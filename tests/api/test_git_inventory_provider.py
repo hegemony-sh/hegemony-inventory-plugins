@@ -453,3 +453,68 @@ async def test_git_provider_test_connection_preserves_safe_details(tmp_path: Pat
     assert result.safe_details == {
         "errors": [{"file_path": "inventory", "message": "Inventory path does not exist"}]
     }
+
+
+@pytest.mark.asyncio
+async def test_git_provider_merges_default_jump_host_onto_devices(tmp_path: Path) -> None:
+    """A shared bastion hop in default_access_config lands on every device.
+
+    The jump_host scope (platform design: dind-sandbox §11.2) merges exactly
+    like ssh/enable, so a lab provider can stamp one bastion on its whole
+    fleet while the per-device files stay credential-free.
+    """
+    _write_yaml(
+        tmp_path / "inventory" / "sites" / "lab" / "lab.yaml",
+        """
+        schema_version: 1
+        kind: site
+        external_id: lab
+        name: Lab
+        """,
+    )
+    _write_yaml(
+        tmp_path / "inventory" / "devices" / "r1.yaml",
+        """
+        schema_version: 1
+        kind: device
+        external_id: r1
+        name: r1
+        mgmt_host: 172.20.30.11
+        site: lab
+        """,
+    )
+
+    provider = GitInventoryProvider(
+        provider_id="git:primary",
+        config={
+            "git_repo_id": str(uuid4()),
+            "path": "inventory",
+            "default_access_config": {
+                "ssh": {"username_ref": "{{ secret('vault://lab/ssh/username') }}"},
+                "jump_host": {
+                    "host": "dind",
+                    "port": 2222,
+                    "username_ref": "{{ secret('vault://lab/bastion/username') }}",
+                    "password_ref": "{{ secret('vault://lab/bastion/password') }}",
+                },
+            },
+        },
+        services=FakePlatformServices(
+            provider_id="git:primary",
+            provider_type="git",
+            git=FakeGitFetcher(path=str(tmp_path)),
+        ),
+    )
+
+    devices = await provider.query_devices(
+        "site=lab",
+        context=ProviderCallContext(provider_id="git:primary", operation="query_devices"),
+    )
+
+    assert len(devices) == 1
+    assert devices[0].access_config["jump_host"] == {
+        "host": "dind",
+        "port": 2222,
+        "username_ref": "{{ secret('vault://lab/bastion/username') }}",
+        "password_ref": "{{ secret('vault://lab/bastion/password') }}",
+    }
