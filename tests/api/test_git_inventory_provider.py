@@ -518,3 +518,91 @@ async def test_git_provider_merges_default_jump_host_onto_devices(tmp_path: Path
         "username_ref": "{{ secret('vault://lab/bastion/username') }}",
         "password_ref": "{{ secret('vault://lab/bastion/password') }}",
     }
+
+
+@pytest.mark.asyncio
+async def test_git_provider_device_can_override_the_default_jump_host(tmp_path: Path) -> None:
+    """A device file may name its own bastion, like ssh/enable can be overridden.
+
+    Regression: the inventory YAML schema forbids unknown keys, so until
+    ``jump_host`` was declared on GitInventoryAccessConfigV1 a device file
+    carrying one failed validation outright — the provider merged a scope no
+    device could ever set, which made jump_host behave unlike every other
+    access-config scope for git inventories.
+    """
+    _write_yaml(
+        tmp_path / "inventory" / "sites" / "lab" / "lab.yaml",
+        """
+        schema_version: 1
+        kind: site
+        external_id: lab
+        name: Lab
+        """,
+    )
+    _write_yaml(
+        tmp_path / "inventory" / "devices" / "r1.yaml",
+        """
+        schema_version: 1
+        kind: device
+        external_id: r1
+        name: r1
+        mgmt_host: 172.20.30.11
+        site: lab
+        """,
+    )
+    _write_yaml(
+        tmp_path / "inventory" / "devices" / "r2.yaml",
+        """
+        schema_version: 1
+        kind: device
+        external_id: r2
+        name: r2
+        mgmt_host: 172.21.30.11
+        site: lab
+        access_config:
+          jump_host:
+            host: bastion-b
+            port: 2022
+        """,
+    )
+
+    provider = GitInventoryProvider(
+        provider_id="git:primary",
+        config={
+            "git_repo_id": str(uuid4()),
+            "path": "inventory",
+            "default_access_config": {
+                "jump_host": {
+                    "host": "dind",
+                    "port": 2222,
+                    "username_ref": "{{ secret('vault://lab/bastion/username') }}",
+                },
+            },
+        },
+        services=FakePlatformServices(
+            provider_id="git:primary",
+            provider_type="git",
+            git=FakeGitFetcher(path=str(tmp_path)),
+        ),
+    )
+
+    devices = await provider.query_devices(
+        "site=lab",
+        context=ProviderCallContext(provider_id="git:primary", operation="query_devices"),
+    )
+    by_id = {device.external_id: device for device in devices}
+
+    # Inherits the fleet default untouched...
+    assert by_id["r1"].access_config["jump_host"] == {
+        "host": "dind",
+        "port": 2222,
+        "username_ref": "{{ secret('vault://lab/bastion/username') }}",
+    }
+    # ...while the device behind another bastion overrides only what it names,
+    # keeping the shared credential ref. An omitted field must not be merged
+    # as an explicit null and blank the default.
+    assert by_id["r2"].access_config["jump_host"] == {
+        "host": "bastion-b",
+        "port": 2022,
+        "username_ref": "{{ secret('vault://lab/bastion/username') }}",
+    }

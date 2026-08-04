@@ -694,3 +694,91 @@ def test_infrahub_config_normalizes_field_map_entries() -> None:
         "platform": "platform.node.name.value",
         "access_config.ssh.username_ref": "hegemony_ssh_username_ref.value",
     }
+
+
+@pytest.mark.asyncio
+async def test_infrahub_merges_default_jump_host_onto_every_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fleet-wide bastion in default_access_config reaches every device.
+
+    Like NetBox and unlike the git provider, Infrahub offers no per-device
+    jump_host mapping — the mappable access_config paths are the ssh/enable
+    credential refs — so the provider default is the whole contract, and it
+    must survive the field-map merge that builds mapped_access_config.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "InfraDevice": {
+                        "edges": [
+                            {
+                                "node": {
+                                    "id": "device-1",
+                                    "display_label": "atl1-edge1",
+                                    "name": {"value": "atl1-edge1"},
+                                    "primary_address": {
+                                        "node": {"address": {"value": "192.0.2.10/32"}}
+                                    },
+                                    "platform": {"node": {"name": {"value": "ios-xe"}}},
+                                    "role": {"value": "edge"},
+                                    "site": {"node": {"name": {"value": "ATL1"}}},
+                                    "tags": {"edges": []},
+                                    "hegemony_ssh_username_ref": {
+                                        "value": "{{ secret('vault://devices/atl1-edge1/user') }}"
+                                    },
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    provider = _provider(
+        token="infrahub-token",
+        config={
+            "field_map": {
+                "access_config.ssh.username_ref": "hegemony_ssh_username_ref.value",
+            },
+            "default_access_config": {
+                "ssh": {"private_key_ref": "{{ secret('vault://shared/infrahub/key') }}"},
+                "jump_host": {
+                    "host": "dind",
+                    "port": 2222,
+                    "username_ref": "{{ secret('vault://lab/bastion/username') }}",
+                    "password_ref": "{{ secret('vault://lab/bastion/password') }}",
+                },
+            },
+        },
+    )
+
+    devices = await provider.query_devices(
+        "",
+        limit=1,
+        context=ProviderCallContext(
+            provider_id=provider.id,
+            operation="auto_sync_devices",
+            query_hash="default-jump-host-test",
+            config_version=1,
+        ),
+    )
+
+    assert devices[0].access_config["jump_host"] == {
+        "host": "dind",
+        "port": 2222,
+        "username_ref": "{{ secret('vault://lab/bastion/username') }}",
+        "password_ref": "{{ secret('vault://lab/bastion/password') }}",
+    }
+    # The scope is additive: mapped and defaulted ssh refs still merge.
+    assert devices[0].access_config["ssh"] == {
+        "username_ref": "{{ secret('vault://devices/atl1-edge1/user') }}",
+        "private_key_ref": "{{ secret('vault://shared/infrahub/key') }}",
+    }
+    # An unconfigured jump_host must not appear as an empty scope.
+    assert "jump_host" not in devices[0].access_config or devices[0].access_config["jump_host"]

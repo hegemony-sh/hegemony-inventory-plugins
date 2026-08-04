@@ -61,11 +61,35 @@ class GitInventorySiteV1(BaseModel):
         return normalized
 
 
+class GitInventoryJumpHostV1(BaseModel):
+    """A per-device bastion hop.
+
+    Its own scope rather than a ``dict[str, str | None]`` like ``ssh`` and
+    ``enable``, because it mixes credential refs with two plain literals —
+    and ``port`` is an int, which the credential-scope type cannot express.
+    Fields mirror the platform's access-config validation exactly (secret
+    refs plus the ``host``/``port`` literals it carries through); anything
+    else is rejected here rather than silently dropped downstream.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str | None = None
+    port: int | None = Field(None, ge=1, le=65535)
+    username_ref: str | None = None
+    password_ref: str | None = None
+    private_key_ref: str | None = None
+
+
 class GitInventoryAccessConfigV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ssh: dict[str, str | None] = Field(default_factory=dict)
     enable: dict[str, str | None] = Field(default_factory=dict)
+    # A device may name its own bastion (a site behind a different jump host)
+    # or omit the block and inherit the provider's default_access_config —
+    # the same per-device override the ssh/enable scopes have always had.
+    jump_host: GitInventoryJumpHostV1 = Field(default_factory=GitInventoryJumpHostV1)
 
 
 class GitInventoryDeviceV1(BaseModel):
