@@ -4,11 +4,11 @@
 
 [project]
 name = "hegemony-inventory-netbox"
-version = "0.2.1"
+version = "0.3.0"
 description = "NetBox inventory provider plugin for Hegemony"
 license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.11"
-dependencies = ["hegemony-inventory-sdk==0.2.1", "httpx>=0.27.0"]
+dependencies = ["hegemony-inventory-sdk==0.3.0", "httpx>=0.27.0"]
 
 [project.entry-points."hegemony.inventory_plugins"]
 netbox = "hegemony_inventory_netbox:register"
