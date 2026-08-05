@@ -444,3 +444,69 @@ async def test_netbox_list_objects_maps_vlans(monkeypatch: pytest.MonkeyPatch) -
         "tenant": None,
         "description": "web tier",
     }
+
+
+def test_netbox_merges_default_jump_host_onto_every_device() -> None:
+    """A fleet-wide bastion in default_access_config reaches every device.
+
+    Unlike the git provider — whose per-device YAML can name its own hop —
+    NetBox exposes only the provider-level default: the mappable
+    access_config paths are fixed by DEFAULT_FIELD_MAP, which carries the
+    ssh/enable credential refs and no jump_host entry. This pins that
+    boundary along with the merge itself.
+    """
+    provider = _provider(
+        {
+            "field_map": {
+                "external_id": "id",
+                "name": "name",
+                "mgmt_host": "primary_ip.address",
+                "access_config.ssh.username_ref": "custom_fields.net_ssh_user",
+            },
+            "default_access_config": {
+                "ssh": {"private_key_ref": "{{ secret('vault://shared/netbox/key') }}"},
+                "jump_host": {
+                    "host": "dind",
+                    "port": 2222,
+                    "username_ref": "{{ secret('vault://lab/bastion/username') }}",
+                    "password_ref": "{{ secret('vault://lab/bastion/password') }}",
+                },
+            },
+        }
+    )
+
+    descriptor = provider._map_device(
+        {
+            "id": 1,
+            "name": "r1",
+            "primary_ip": {"address": "192.0.2.10/32"},
+            "custom_fields": {"net_ssh_user": "{{ secret('vault://devices/r1/user') }}"},
+        }
+    )
+
+    assert descriptor.access_config["jump_host"] == {
+        "host": "dind",
+        "port": 2222,
+        "username_ref": "{{ secret('vault://lab/bastion/username') }}",
+        "password_ref": "{{ secret('vault://lab/bastion/password') }}",
+    }
+    # The scope is additive: mapped and defaulted ssh refs still merge.
+    assert descriptor.access_config["ssh"] == {
+        "username_ref": "{{ secret('vault://devices/r1/user') }}",
+        "private_key_ref": "{{ secret('vault://shared/netbox/key') }}",
+    }
+
+
+def test_netbox_without_default_jump_host_emits_no_jump_host_scope() -> None:
+    # An empty scope must not appear at all: a jump_host block with no host
+    # would make the platform attempt a bastion hop to nowhere.
+    provider = _provider(
+        {
+            "field_map": {"external_id": "id", "name": "name", "mgmt_host": "primary_ip.address"},
+            "default_access_config": {"ssh": {"username_ref": "{{ secret('vault://a/b') }}"}},
+        }
+    )
+    descriptor = provider._map_device(
+        {"id": 1, "name": "r1", "primary_ip": {"address": "192.0.2.10/32"}, "custom_fields": {}}
+    )
+    assert "jump_host" not in descriptor.access_config

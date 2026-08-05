@@ -225,8 +225,22 @@ class GitInventoryProvider(InventoryProvider):
             else {}
         )
         device_access_config = device.access_config.model_dump(mode="json")
+        # jump_host is a typed model, so an omitted block still dumps every
+        # field as None. Those Nones mean "not specified" and must not erase
+        # the provider default — unlike the ssh/enable scopes, whose free-form
+        # dicts carry only the keys a device file actually wrote (there an
+        # explicit null is a deliberate "clear the inherited value").
+        jump_host = device_access_config.get("jump_host")
+        if isinstance(jump_host, Mapping):
+            device_access_config["jump_host"] = {
+                key: value for key, value in jump_host.items() if value is not None
+            }
 
-        for scope in ("ssh", "enable"):
+        # jump_host rides along with the credential scopes so a provider can
+        # stamp a shared bastion hop on every device it yields
+        # (design-dind-sandbox.md §11.2 in the platform repo), while a device
+        # behind a different bastion overrides it field by field.
+        for scope in ("ssh", "enable", "jump_host"):
             scope_values: dict[str, Any] = {}
 
             default_scope = defaults.get(scope)

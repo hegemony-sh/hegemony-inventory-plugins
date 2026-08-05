@@ -511,7 +511,10 @@ class InfrahubInventoryProvider(InventoryProvider):
                         mapped_value,
                     )
 
-        for scope in ("ssh", "enable"):
+        # jump_host rides along with the credential scopes so a provider can
+        # stamp a shared bastion hop on every device it yields
+        # (design-dind-sandbox.md §11.2 in the platform repo).
+        for scope in ("ssh", "enable", "jump_host"):
             scope_values: dict[str, Any] = {}
 
             default_scope = defaults.get(scope)
