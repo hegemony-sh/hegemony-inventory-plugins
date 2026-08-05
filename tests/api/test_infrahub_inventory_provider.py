@@ -780,5 +780,80 @@ async def test_infrahub_merges_default_jump_host_onto_every_device(
         "username_ref": "{{ secret('vault://devices/atl1-edge1/user') }}",
         "private_key_ref": "{{ secret('vault://shared/infrahub/key') }}",
     }
-    # An unconfigured jump_host must not appear as an empty scope.
-    assert "jump_host" not in devices[0].access_config or devices[0].access_config["jump_host"]
+
+
+@pytest.mark.asyncio
+async def test_infrahub_without_default_jump_host_emits_no_jump_host_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No configured bastion means no scope at all, not an empty one.
+
+    An empty ``jump_host`` block would reach the worker's resolver, which
+    treats the block's presence as "a bastion was declared" and fails the
+    connection rather than dialling the device directly. The parity test for
+    NetBox is test_netbox_without_default_jump_host_emits_no_jump_host_scope;
+    this had to be its own provider instance, because asserting it inside the
+    configured-jump_host test above can only ever pass vacuously.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "InfraDevice": {
+                        "edges": [
+                            {
+                                "node": {
+                                    "id": "device-1",
+                                    "display_label": "atl1-edge1",
+                                    "name": {"value": "atl1-edge1"},
+                                    "primary_address": {
+                                        "node": {"address": {"value": "192.0.2.10/32"}}
+                                    },
+                                    "platform": {"node": {"name": {"value": "ios-xe"}}},
+                                    "role": {"value": "edge"},
+                                    "site": {"node": {"name": {"value": "ATL1"}}},
+                                    "tags": {"edges": []},
+                                    "hegemony_ssh_username_ref": {
+                                        "value": "{{ secret('vault://devices/atl1-edge1/user') }}"
+                                    },
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    provider = _provider(
+        token="infrahub-token",
+        config={
+            "field_map": {
+                "access_config.ssh.username_ref": "hegemony_ssh_username_ref.value",
+            },
+            "default_access_config": {
+                "ssh": {"private_key_ref": "{{ secret('vault://shared/infrahub/key') }}"},
+            },
+        },
+    )
+
+    devices = await provider.query_devices(
+        "",
+        limit=1,
+        context=ProviderCallContext(
+            provider_id=provider.id,
+            operation="auto_sync_devices",
+            query_hash="no-jump-host-test",
+            config_version=1,
+        ),
+    )
+
+    assert "jump_host" not in devices[0].access_config
+    # The other scopes are unaffected by the absent one.
+    assert devices[0].access_config["ssh"] == {
+        "username_ref": "{{ secret('vault://devices/atl1-edge1/user') }}",
+        "private_key_ref": "{{ secret('vault://shared/infrahub/key') }}",
+    }
