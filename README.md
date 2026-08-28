@@ -43,7 +43,7 @@ API_CONTAINER=<your API container name>
 docker exec -u root -it "${API_CONTAINER}" bash -lc "
 set -euo pipefail
 version=${VERSION}
-base=https://github.com/tvarohohlavy/hegemony-inventory-plugins/releases/download/v\${version}
+base=https://github.com/hegemony-sh/hegemony-inventory-plugins/releases/download/v\${version}
 tmp=\$(mktemp -d)
 cd \"\${tmp}\"
 curl -fsSLO \"\${base}/SHA256SUMS\"
