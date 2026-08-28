@@ -1,7 +1,7 @@
 version = 1
 SPDX-PackageName = "hegemony-inventory-plugins"
 SPDX-PackageSupplier = "Jakub Travnik <jakub.travnik@gmail.com>"
-SPDX-PackageDownloadLocation = "https://github.com/tvarohohlavy/hegemony-inventory-plugins"
+SPDX-PackageDownloadLocation = "https://github.com/hegemony-sh/hegemony-inventory-plugins"
 
 [[annotations]]
 path = "uv.lock"
