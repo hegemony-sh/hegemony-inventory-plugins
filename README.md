@@ -140,5 +140,8 @@ Tags must match package metadata. A `v0.1.0` tag publishes four wheels plus
 Releases are intended to be immutable: the release workflow fails if a GitHub
 Release for the tag already exists and never replaces published assets. If a
 release artifact is wrong, cut a new patch tag instead of mutating the existing
-release. The release workflow also creates GitHub artifact attestations for the
-wheel files and checksum file.
+release. The release workflow also
+creates GitHub artifact attestations for the wheel files and checksum file,
+but only for public releases: attestation needs a public repository or an
+Enterprise plan, so releases cut while this repository is private ship
+checksums only.
