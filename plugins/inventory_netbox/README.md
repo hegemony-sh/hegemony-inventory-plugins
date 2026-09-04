@@ -34,6 +34,7 @@ rendered automatically and `token_ref` gets a secret picker.
 | `auth_scheme` | no | `Bearer` | Authorization scheme prefixed to the resolved token |
 | `auth_fallback_schemes` | no | `["Token"]` | Schemes retried on auth failure |
 | `verify_tls` | no | `true` | Verify the TLS certificate |
+| `device_query` | no | `""` | NetBox device filter applied to **every** device read, e.g. `status=active&role=wan-edge` |
 | `tag_key_prefix` | no | `tag:` | Prefix for NetBox tag slugs surfaced as filterable device tags. Set to `""` for bare keys |
 | `field_map` | no | built-in | Maps normalized inventory fields → NetBox REST payload paths, including optional `access_config.*` refs under `custom_fields` |
 | `default_access_config` | no | `{}` | Access-config defaults applied to every device |
@@ -60,6 +61,14 @@ Built-in `field_map` defaults:
   "mgmt_host": "primary_ip4.address",
   "platform": "platform.slug",
   "model": "device_type.model",
+  "vendor": "device_type.manufacturer.name",
+  "serial": "serial",
+  "asset_tag": "asset_tag",
+  "rack": "rack.name",
+  "position": "position",
+  "tenant": "tenant.slug",
+  "location": "location.slug",
+  "mgmt_host_v6": "primary_ip6.address",
   "site.external_id": "site.slug",
   "site.name": "site.name",
   "role": "role.slug",
@@ -77,6 +86,35 @@ The device `platform` is mapped from NetBox's native `platform.slug`. When a dev
 no platform in NetBox, the provider emits no value and the **core inventory service**
 applies its default platform during materialization — there is no per-provider platform
 setting.
+
+### Scoping what syncs
+
+Auto-sync calls `query_devices` with an empty expression, so by default a provider
+imports the **entire** NetBox device table. `device_query` sets a baseline filter applied
+to every device read:
+
+```json
+{ "device_query": "status=active&role=wan-edge&tag=managed" }
+```
+
+A caller-supplied query (a run-form preview, for instance) is appended to it, and NetBox
+ANDs the two.
+
+### Extra device fields
+
+`vendor` maps from `device_type.manufacturer.name` and lands on the device row, where the
+UI's Vendor column and `?vendor=` search filter can use it. `serial`, `asset_tag`, `rack`,
+`position`, `tenant`, `location` and `mgmt_host_v6` have no device column, so they are
+surfaced under `descriptive` — searchable (it is GIN-indexed) and visible over the API.
+Each is omitted entirely when the device does not carry it.
+
+### Linking back to NetBox
+
+Every device, site and IPAM object carries `descriptive.provider_url`, the NetBox UI page
+for that object, so Hegemony can offer an "Open in NetBox" link. It is read from NetBox's
+own `display_url`, falling back to the API `url` with its `/api` prefix dropped, and is
+pinned to the configured provider origin — a NetBox echoing another host cannot turn the
+link into an off-site redirect.
 
 ### Site identity
 
