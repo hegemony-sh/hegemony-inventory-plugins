@@ -34,6 +34,7 @@ rendered automatically and `token_ref` gets a secret picker.
 | `auth_scheme` | no | `Bearer` | Authorization scheme prefixed to the resolved token |
 | `auth_fallback_schemes` | no | `["Token"]` | Schemes retried on auth failure |
 | `verify_tls` | no | `true` | Verify the TLS certificate |
+| `tag_key_prefix` | no | `tag:` | Prefix for NetBox tag slugs surfaced as filterable device tags. Set to `""` for bare keys |
 | `field_map` | no | built-in | Maps normalized inventory fields → NetBox REST payload paths, including optional `access_config.*` refs under `custom_fields` |
 | `default_access_config` | no | `{}` | Access-config defaults applied to every device |
 | `query_cache_ttl_seconds` | no | `null` | Optional query cache TTL (0–86400 s) |
@@ -77,6 +78,23 @@ no platform in NetBox, the provider emits no value and the **core inventory serv
 applies its default platform during materialization — there is no per-provider platform
 setting.
 
+### Site identity
+
+A site reaches the platform by two routes — the `/api/dcim/sites/` listing and the
+`site` object nested inside each device — and the platform keys sites on
+`(provider_id, external_id)`. Both routes therefore resolve the external id through the
+**same** `field_map` entry, `site.external_id` (default `site.slug`, so the key is the
+slug). Remapping it to `site.id` moves both routes together. Parent links use the same
+key, so the NetBox site hierarchy survives the round trip.
+
+### Tags
+
+NetBox tags are flat slugs, but devices are filtered on a `key=value` map
+(`tags[role]=core` in device search, `tag.*` in run forms). Each NetBox tag is surfaced
+as `<tag_key_prefix><slug> = "true"` — the tag `core` becomes `tags["tag:core"]`. The
+prefix keeps a NetBox tag named `role` from colliding with the mapped device role. The
+raw slugs remain available unprefixed as `native_tags`.
+
 ### Access config
 
 The same generic `field_map` also controls optional access-config refs. For example,
@@ -90,6 +108,9 @@ values override those defaults when present.
 - `ip_prefix`, `ip_address`, `vlan` — NetBox IPAM prefixes/addresses and VLANs. They appear
   under the **Inventory** menu with schema-driven list/detail pages and sync alongside
   devices/sites whenever the provider syncs.
+
+List and detail reads both go through the endpoint/mapping table, and a query mapping is
+pushed to NetBox as a querystring rather than filtered client-side.
 
 ## Adding an object type
 

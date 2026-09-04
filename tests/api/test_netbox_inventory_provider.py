@@ -510,3 +510,218 @@ def test_netbox_without_default_jump_host_emits_no_jump_host_scope() -> None:
         {"id": 1, "name": "r1", "primary_ip": {"address": "192.0.2.10/32"}, "custom_fields": {}}
     )
     assert "jump_host" not in descriptor.access_config
+
+
+def _json_transport(
+    routes: dict[str, Any], recorder: list[str] | None = None
+) -> httpx.MockTransport:
+    """Serve canned JSON per request path, recording the full URL of each call."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if recorder is not None:
+            recorder.append(str(request.url))
+        payload = routes.get(request.url.path)
+        if payload is None:
+            return httpx.Response(404, json={"detail": "not found"})
+        return httpx.Response(200, json=payload)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_netbox_site_external_id_matches_between_site_list_and_device_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A site keys identically whether it arrives via /sites/ or nested in a device.
+
+    The two paths used to disagree — ``_map_site`` emitted the numeric NetBox id
+    while the device field map emitted ``site.slug`` — so the platform, which keys
+    sites on ``(provider_id, external_id)``, materialized every NetBox site twice
+    and attached devices to the copy carrying no parent link.
+    """
+    provider = _provider(token="netbox-token")
+    site_payload = {"id": 7, "slug": "prg1", "name": "Prague 1", "physical_address": "Praha"}
+    _install_transport(
+        monkeypatch,
+        _json_transport({"/api/dcim/sites/": {"results": [site_payload], "next": None}}),
+    )
+
+    listed = await provider.list_sites(
+        context=ProviderCallContext(provider_id="netbox:primary", operation="list_sites")
+    )
+    nested = provider._map_device(
+        {"id": 1, "name": "router-1", "site": {"id": 7, "slug": "prg1", "name": "Prague 1"}}
+    )
+
+    assert [site.external_id for site in listed] == ["prg1"]
+    assert nested.site is not None
+    assert nested.site.external_id == listed[0].external_id
+
+
+def test_netbox_site_parent_is_keyed_like_its_children() -> None:
+    """A parent reference uses the same key as the sites it parents.
+
+    Emitting a numeric parent id against slug-keyed children left every parent
+    link dangling, which is what disconnected the NetBox site hierarchy.
+    """
+    provider = _provider()
+
+    site = provider._map_site(
+        {
+            "id": 7,
+            "slug": "prg1",
+            "name": "Prague 1",
+            "parent": {"id": 3, "slug": "cz", "name": "Czechia"},
+        }
+    )
+
+    assert site.external_id == "prg1"
+    assert site.parent_external_id == "cz"
+
+
+def test_netbox_site_key_follows_the_configured_field_map() -> None:
+    """Remapping ``site.external_id`` moves both mapping paths together."""
+    provider = _provider({"field_map": {"site.external_id": "site.id"}})
+
+    site = provider._map_site({"id": 7, "slug": "prg1", "name": "Prague 1"})
+    device = provider._map_device({"id": 1, "name": "r1", "site": {"id": 7, "slug": "prg1"}})
+
+    assert site.external_id == "7"
+    assert device.site is not None
+    assert device.site.external_id == "7"
+
+
+@pytest.mark.asyncio
+async def test_netbox_get_object_fetches_the_ipam_detail_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IPAM detail pages resolve instead of raising "not supported"."""
+    provider = _provider(token="netbox-token")
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _json_transport(
+            {
+                "/api/ipam/prefixes/42/": {
+                    "id": 42,
+                    "prefix": "10.0.0.0/24",
+                    "status": {"value": "active"},
+                    "site": {"slug": "prg1"},
+                }
+            },
+            seen,
+        ),
+    )
+
+    descriptor = await provider.get_object(
+        "ip_prefix",
+        "42",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="get_object"),
+    )
+
+    assert seen == ["https://netbox.example/api/ipam/prefixes/42/"]
+    assert descriptor.object_type == "ip_prefix"
+    assert descriptor.external_id == "42"
+    assert descriptor.name == "10.0.0.0/24"
+    assert descriptor.attributes["status"] == "active"
+    assert descriptor.attributes["site"] == "prg1"
+
+
+@pytest.mark.asyncio
+async def test_netbox_get_object_rejects_an_unserved_object_type() -> None:
+    """A type the provider does not serve still fails closed."""
+    provider = _provider()
+
+    with pytest.raises(InventoryProviderError) as excinfo:
+        await provider.get_object(
+            "circuit",
+            "1",
+            context=ProviderCallContext(provider_id="netbox:primary", operation="get_object"),
+        )
+
+    assert "not supported" in excinfo.value.envelope.message
+
+
+@pytest.mark.asyncio
+async def test_netbox_list_objects_pushes_the_query_to_netbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IPAM filtering happens server-side rather than being silently dropped."""
+    provider = _provider(token="netbox-token")
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _json_transport({"/api/ipam/vlans/": {"results": [], "next": None}}, seen),
+    )
+
+    await provider.list_objects(
+        "vlan",
+        {"site": "prg1", "status": "active"},
+        context=ProviderCallContext(provider_id="netbox:primary", operation="list_objects"),
+    )
+
+    assert seen == ["https://netbox.example/api/ipam/vlans/?site=prg1&status=active"]
+
+
+@pytest.mark.asyncio
+async def test_netbox_list_pushes_the_query_for_devices_and_sites(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``list()`` honours its ``query`` argument for both resource types."""
+    provider = _provider(token="netbox-token")
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _json_transport(
+            {
+                "/api/dcim/devices/": {"results": [], "next": None},
+                "/api/dcim/sites/": {"results": [], "next": None},
+            },
+            seen,
+        ),
+    )
+    context = ProviderCallContext(provider_id="netbox:primary", operation="list")
+
+    await provider.list(
+        netbox_provider_module.ResourceType.DEVICE, {"role": "edge"}, context=context
+    )
+    await provider.list(netbox_provider_module.ResourceType.SITE, {"group": "eu"}, context=context)
+
+    assert seen == [
+        "https://netbox.example/api/dcim/devices/?role=edge",
+        "https://netbox.example/api/dcim/sites/?group=eu",
+    ]
+
+
+def test_netbox_tags_become_filterable_device_tags() -> None:
+    """NetBox tag slugs land in the key/value tag map the platform filters on.
+
+    Native tags alone are not reachable from device search or a run form's
+    ``tag.*`` filter, both of which read the ``tags`` map.
+    """
+    provider = _provider()
+
+    descriptor = provider._map_device(
+        {
+            "id": 1,
+            "name": "router-1",
+            "role": {"slug": "edge"},
+            "tags": [{"slug": "core"}, {"name": "wan"}],
+        }
+    )
+
+    assert descriptor.tags == {"role": "edge", "tag:core": "true", "tag:wan": "true"}
+    assert descriptor.native_tags == ("core", "wan")
+
+
+def test_netbox_tag_key_prefix_is_configurable_and_avoids_role_collisions() -> None:
+    """The prefix is what keeps a NetBox tag named ``role`` from shadowing the role."""
+    prefixed = _provider()._map_device(
+        {"id": 1, "name": "r1", "role": {"slug": "edge"}, "tags": [{"slug": "role"}]}
+    )
+    bare = _provider({"tag_key_prefix": ""})._map_device(
+        {"id": 1, "name": "r1", "tags": [{"slug": "core"}]}
+    )
+
+    assert prefixed.tags == {"role": "edge", "tag:role": "true"}
+    assert bare.tags == {"core": "true"}

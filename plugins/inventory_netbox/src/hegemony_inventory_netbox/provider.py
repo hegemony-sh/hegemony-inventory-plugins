@@ -11,7 +11,7 @@ import builtins
 from collections.abc import Mapping
 from time import monotonic
 from typing import Any
-from urllib.parse import ParseResult, urljoin, urlparse
+from urllib.parse import ParseResult, quote, urlencode, urljoin, urlparse
 
 import httpx
 
@@ -30,12 +30,33 @@ from hegemony_inventory_sdk import (
     ResourceRef,
     ResourceType,
     SiteRef,
+    map_record,
     map_records,
 )
 
 from .config import DEFAULT_FIELD_MAP, NetBoxProviderConfig
 
 KNOWN_AUTH_SCHEMES = frozenset({"bearer", "token", "basic"})
+
+
+def _query_to_expr(query: Mapping[str, Any] | None) -> str:
+    """Render a query mapping as a URL-encoded NetBox querystring.
+
+    A sequence value repeats its key the way NetBox's filter DSL expects
+    (``?tag=core&tag=wan``); ``None`` values are dropped rather than sent as the
+    string "None".
+    """
+    if not query:
+        return ""
+    pairs: list[tuple[str, str]] = []
+    for key, value in query.items():
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            pairs.extend((str(key), str(item)) for item in value if item is not None)
+        else:
+            pairs.append((str(key), str(value)))
+    return urlencode(pairs)
 
 
 def _optional_str(value: Any) -> str | None:
@@ -175,7 +196,9 @@ class NetBoxInventoryProvider(InventoryProvider):
                     display_name=d.safe_display_name,
                     descriptive=d.descriptive,
                 )
-                for d in await self.query_devices("", limit=limit, context=context)
+                for d in await self.query_devices(
+                    _query_to_expr(query), limit=limit, context=context
+                )
             ]
         if resource_type == ResourceType.SITE:
             return [
@@ -186,7 +209,9 @@ class NetBoxInventoryProvider(InventoryProvider):
                     display_name=s.name,
                     descriptive=s.descriptive,
                 )
-                for s in await self.list_sites(limit=limit, context=context)
+                for s in await self._fetch_sites(
+                    _query_to_expr(query), limit=limit, context=context
+                )
             ]
         return []
 
@@ -224,8 +249,18 @@ class NetBoxInventoryProvider(InventoryProvider):
     async def list_sites(
         self, *, limit: int | None = None, context: ProviderCallContext
     ) -> builtins.list[SiteRef]:
+        return await self._fetch_sites("", limit=limit, context=context)
+
+    async def _fetch_sites(
+        self, expr: str, *, limit: int | None, context: ProviderCallContext
+    ) -> builtins.list[SiteRef]:
+        """List sites, optionally narrowed by a NetBox filter expression."""
+        path = "/api/dcim/sites/"
+        query = expr.lstrip("?")
+        if query:
+            path = f"{path}?{query}"
         items = await self._paginated(
-            "/api/dcim/sites/",
+            path,
             context,
             page_limit=self._services.limits.max_provider_pages,
             result_limit=limit or self._services.limits.max_preview_devices,
@@ -249,13 +284,43 @@ class NetBoxInventoryProvider(InventoryProvider):
                 object_type, query, limit=limit, cursor=cursor, context=context
             )
         endpoint, mapping = source
+        expr = _query_to_expr(query)
+        path = f"{endpoint}?{expr}" if expr else endpoint
         items = await self._paginated(
-            endpoint,
+            path,
             context,
             page_limit=self._services.limits.max_provider_pages,
             result_limit=limit or self._services.limits.max_run_targets,
         )
         return map_records(items, mapping, provider_id=self.id)
+
+    async def get_object(
+        self,
+        object_type: str,
+        external_id: str,
+        *,
+        context: ProviderCallContext,
+    ) -> ObjectDescriptor:
+        """Fetch one object of ``object_type``.
+
+        The IPAM types are served from the same endpoint/mapping table as
+        ``list_objects``; without this override they fell through to the SDK
+        default, which only knows device and site, so every IPAM detail page
+        raised "not supported".
+        """
+        source = _IPAM_OBJECT_SOURCES.get(object_type)
+        if source is None:
+            return await super().get_object(object_type, external_id, context=context)
+        endpoint, mapping = source
+        identifier = quote(str(external_id).strip(), safe="")
+        if not identifier:
+            raise self._error(
+                ProviderErrorCode.NOT_FOUND,
+                "NetBox object id is empty",
+                context.operation,
+            )
+        payload = await self._request_json(f"{endpoint}{identifier}/", context)
+        return map_record(payload, mapping, provider_id=self.id)
 
     async def test_connection(self, *, context: ProviderCallContext) -> ProviderTestResult:
         start = monotonic()
@@ -614,20 +679,67 @@ class NetBoxInventoryProvider(InventoryProvider):
             model=model,
             site=site,
             role=str(role) if role else None,
-            tags={"role": str(role)} if role else {},
+            tags=self._device_tags(role, native_tags),
             native_tags=native_tags,
             access_config=validated_access_config,
             descriptive=descriptive,
         )
 
+    def _site_id_path(self) -> str:
+        """The site-payload path holding a site's external id.
+
+        Derived from the same ``field_map['site.external_id']`` entry ``_map_device``
+        reads, minus its leading ``site.`` segment, so a site fetched from
+        ``/api/dcim/sites/`` and the same site nested inside a device key on the
+        identical value. When the two disagreed (numeric ``id`` here, ``slug``
+        there) the platform materialized every NetBox site twice and attached
+        devices to the copy that carried no parent link or location.
+        """
+        path = (
+            self.config.field_map.get("site.external_id") or DEFAULT_FIELD_MAP["site.external_id"]
+        )
+        prefix, separator, remainder = path.partition(".")
+        if separator and prefix == "site" and remainder:
+            return remainder
+        return path
+
+    def _site_external_id(self, item: Mapping[str, Any]) -> str | None:
+        """Resolve one site payload's external id through :meth:`_site_id_path`."""
+        return (
+            _optional_str(_lookup_path(item, self._site_id_path()))
+            or _optional_str(item.get("id"))
+            or _optional_str(item.get("slug"))
+            or _optional_str(item.get("name"))
+        )
+
+    def _device_tags(self, role: Any, native_tags: tuple[str, ...]) -> dict[str, str]:
+        """Build the filterable ``key=value`` tag map for one device.
+
+        NetBox tags are flat slugs, but the platform filters devices on a
+        ``key=value`` map (``tags[role]=core`` in device search, ``tag.*`` in run
+        forms). Each NetBox tag is therefore surfaced as ``<prefix><slug>=true``.
+        The prefix keeps a tag named ``role`` from colliding with the role entry
+        and is configurable via ``tag_key_prefix``; set it to an empty string to
+        map NetBox tags onto bare keys.
+        """
+        tags: dict[str, str] = {}
+        if role:
+            tags["role"] = str(role)
+        prefix = self.config.tag_key_prefix
+        for slug in native_tags:
+            key = f"{prefix}{slug}".strip()
+            if slug and key:
+                tags[key] = "true"
+        return tags
+
     def _map_site(self, item: Mapping[str, Any]) -> SiteRef:
-        external_id = str(item.get("id") or item.get("slug") or item.get("name") or "")
+        external_id = self._site_external_id(item) or ""
         parent = item.get("parent") if isinstance(item.get("parent"), Mapping) else None
         return SiteRef(
             provider_id=self.id,
             external_id=external_id,
             name=str(item.get("name") or item.get("display") or external_id),
-            parent_external_id=str(parent.get("id") or parent.get("slug")) if parent else None,
+            parent_external_id=self._site_external_id(parent) if parent else None,
             location=str(item.get("physical_address") or item.get("description") or "") or None,
             descriptive={"slug": item.get("slug")},
         )

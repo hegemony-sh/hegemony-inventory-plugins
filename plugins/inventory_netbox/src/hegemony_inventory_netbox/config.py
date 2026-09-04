@@ -54,6 +54,16 @@ class NetBoxProviderConfig(BaseModel):
         description="Fallback Authorization schemes retried after auth failures when the token is unprefixed.",
     )
     verify_tls: bool = True
+    tag_key_prefix: str = Field(
+        "tag:",
+        max_length=32,
+        description=(
+            "Prefix for NetBox tag slugs surfaced as filterable device tags, e.g. the "
+            "NetBox tag 'core' becomes tags['tag:core'] = 'true'. The prefix keeps a "
+            "NetBox tag named 'role' from colliding with the mapped device role; set it "
+            "to an empty string to map NetBox tags onto bare keys."
+        ),
+    )
     field_map: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_FIELD_MAP))
     default_access_config: dict[str, Any] = Field(default_factory=dict)
     query_cache_ttl_seconds: int | None = Field(None, ge=0, le=86400)
@@ -88,6 +98,13 @@ class NetBoxProviderConfig(BaseModel):
         else:
             raise ValueError("auth_fallback_schemes must be a list or comma-separated string")
         return [item for item in candidates if item]
+
+    @field_validator("tag_key_prefix", mode="before")
+    @classmethod
+    def normalize_tag_key_prefix(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
 
     @field_validator("field_map")
     @classmethod
