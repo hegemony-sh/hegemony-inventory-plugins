@@ -725,3 +725,146 @@ def test_netbox_tag_key_prefix_is_configurable_and_avoids_role_collisions() -> N
 
     assert prefixed.tags == {"role": "edge", "tag:role": "true"}
     assert bare.tags == {"core": "true"}
+
+
+def test_netbox_maps_manufacturer_to_vendor_and_extras_to_descriptive() -> None:
+    """Vendor is a first-class device column the UI filters on; it was always None.
+
+    Serial, asset tag, rack, position, tenant and location have no device column,
+    so they ride along in ``descriptive``, which is GIN-indexed and API-visible.
+    """
+    provider = _provider()
+
+    descriptor = provider._map_device(
+        {
+            "id": 1,
+            "name": "router-1",
+            "device_type": {"model": "MX204", "manufacturer": {"name": "Juniper"}},
+            "serial": "ABC123",
+            "asset_tag": "ASSET-9",
+            "rack": {"name": "R12"},
+            "position": 21,
+            "tenant": {"slug": "acme"},
+            "location": {"slug": "hall-a"},
+            "primary_ip6": {"address": "2001:db8::10/128"},
+        }
+    )
+
+    assert descriptor.vendor == "Juniper"
+    assert descriptor.model == "MX204"
+    assert descriptor.descriptive["serial"] == "ABC123"
+    assert descriptor.descriptive["asset_tag"] == "ASSET-9"
+    assert descriptor.descriptive["rack"] == "R12"
+    assert descriptor.descriptive["position"] == 21
+    assert descriptor.descriptive["tenant"] == "acme"
+    assert descriptor.descriptive["location"] == "hall-a"
+    assert descriptor.descriptive["mgmt_host_v6"] == "2001:db8::10"
+
+
+def test_netbox_omits_descriptive_extras_a_device_does_not_carry() -> None:
+    """A device with none of the optional fields gains no empty keys."""
+    descriptor = _provider()._map_device({"id": 1, "name": "router-1"})
+
+    for absent in ("serial", "asset_tag", "rack", "position", "tenant", "mgmt_host_v6"):
+        assert absent not in descriptor.descriptive
+    assert descriptor.vendor is None
+
+
+def test_netbox_device_provider_url_prefers_display_url() -> None:
+    """The deep link comes from NetBox's own URL fields, not a constructed path."""
+    provider = _provider()
+
+    from_display = provider._map_device(
+        {
+            "id": 1,
+            "name": "r1",
+            "display_url": "https://netbox.example/dcim/devices/1/",
+            "url": "https://netbox.example/api/dcim/devices/1/",
+        }
+    )
+    from_api_url = provider._map_device(
+        {"id": 2, "name": "r2", "url": "https://netbox.example/api/dcim/devices/2/"}
+    )
+
+    assert from_display.descriptive["provider_url"] == "https://netbox.example/dcim/devices/1/"
+    assert from_api_url.descriptive["provider_url"] == "https://netbox.example/dcim/devices/2/"
+
+
+def test_netbox_provider_url_rejects_an_off_origin_link() -> None:
+    """A NetBox echoing another host must not become an off-site redirect."""
+    descriptor = _provider()._map_device(
+        {"id": 1, "name": "r1", "display_url": "https://evil.example/dcim/devices/1/"}
+    )
+
+    assert "provider_url" not in descriptor.descriptive
+
+
+def test_netbox_site_carries_a_provider_url() -> None:
+    site = _provider()._map_site(
+        {
+            "id": 7,
+            "slug": "prg1",
+            "name": "Prague 1",
+            "display_url": "https://netbox.example/dcim/sites/7/",
+        }
+    )
+
+    assert site.descriptive["provider_url"] == "https://netbox.example/dcim/sites/7/"
+    assert site.descriptive["slug"] == "prg1"
+
+
+@pytest.mark.asyncio
+async def test_netbox_device_query_narrows_every_device_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto-sync calls query_devices with an empty expression.
+
+    Without a configured baseline that pulls the entire NetBox device table.
+    """
+    provider = _provider({"device_query": "?status=active&role=wan-edge"}, token="netbox-token")
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _json_transport({"/api/dcim/devices/": {"results": [], "next": None}}, seen),
+    )
+    context = ProviderCallContext(provider_id="netbox:primary", operation="query_devices")
+
+    await provider.query_devices("", context=context)
+    await provider.query_devices("site=prg1", context=context)
+
+    assert seen == [
+        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge",
+        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge&site=prg1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_netbox_ipam_objects_carry_a_provider_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _provider(token="netbox-token")
+    _install_transport(
+        monkeypatch,
+        _json_transport(
+            {
+                "/api/ipam/vlans/": {
+                    "results": [
+                        {
+                            "id": 5,
+                            "name": "users",
+                            "vid": 10,
+                            "display_url": "https://netbox.example/ipam/vlans/5/",
+                        }
+                    ],
+                    "next": None,
+                }
+            }
+        ),
+    )
+
+    objects = await provider.list_objects(
+        "vlan",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="list_objects"),
+    )
+
+    assert objects[0].descriptive["provider_url"] == "https://netbox.example/ipam/vlans/5/"

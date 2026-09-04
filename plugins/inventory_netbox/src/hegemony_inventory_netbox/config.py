@@ -18,6 +18,16 @@ DEFAULT_FIELD_MAP = {
     "mgmt_host": "primary_ip4.address",
     "platform": "platform.slug",
     "model": "device_type.model",
+    "vendor": "device_type.manufacturer.name",
+    # Surfaced under ``descriptive`` — the platform's device row has no column
+    # for these, but they are searchable there and visible over the API.
+    "serial": "serial",
+    "asset_tag": "asset_tag",
+    "rack": "rack.name",
+    "position": "position",
+    "tenant": "tenant.slug",
+    "location": "location.slug",
+    "mgmt_host_v6": "primary_ip6.address",
     "site.external_id": "site.slug",
     "site.name": "site.name",
     "role": "role.slug",
@@ -54,6 +64,15 @@ class NetBoxProviderConfig(BaseModel):
         description="Fallback Authorization schemes retried after auth failures when the token is unprefixed.",
     )
     verify_tls: bool = True
+    device_query: str = Field(
+        "",
+        max_length=2048,
+        description=(
+            "NetBox device filter applied to every device read, e.g. "
+            "'status=active&role=wan-edge'. Auto-sync otherwise pulls the entire "
+            "device table. A caller-supplied query is appended to this one."
+        ),
+    )
     tag_key_prefix: str = Field(
         "tag:",
         max_length=32,
@@ -98,6 +117,14 @@ class NetBoxProviderConfig(BaseModel):
         else:
             raise ValueError("auth_fallback_schemes must be a list or comma-separated string")
         return [item for item in candidates if item]
+
+    @field_validator("device_query", mode="before")
+    @classmethod
+    def normalize_device_query(cls, value: Any) -> str:
+        """Accept a leading '?' and surrounding whitespace."""
+        if value is None:
+            return ""
+        return str(value).strip().lstrip("?").strip()
 
     @field_validator("tag_key_prefix", mode="before")
     @classmethod

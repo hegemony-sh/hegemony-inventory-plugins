@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 from collections.abc import Mapping
+from dataclasses import replace
 from time import monotonic
 from typing import Any
 from urllib.parse import ParseResult, quote, urlencode, urljoin, urlparse
@@ -236,9 +237,12 @@ class NetBoxInventoryProvider(InventoryProvider):
         page_limit = self._services.limits.max_provider_pages
         result_limit = limit or self._services.limits.max_run_targets
         path = "/api/dcim/devices/"
-        query = expr.lstrip("?")
-        if query:
-            path = f"{path}?{query}"
+        # The configured baseline narrows every device read (auto-sync calls this
+        # with an empty expression, so without it a sync pulls the whole table);
+        # a caller expression is appended, and NetBox ANDs the two.
+        parts = [part for part in (self.config.device_query, expr.lstrip("?")) if part]
+        if parts:
+            path = f"{path}?{'&'.join(parts)}"
         items = await self._paginated(
             path, context, page_limit=page_limit, result_limit=result_limit
         )
@@ -292,7 +296,12 @@ class NetBoxInventoryProvider(InventoryProvider):
             page_limit=self._services.limits.max_provider_pages,
             result_limit=limit or self._services.limits.max_run_targets,
         )
-        return map_records(items, mapping, provider_id=self.id)
+        return [
+            self._with_provider_url(descriptor, item)
+            for descriptor, item in zip(
+                map_records(items, mapping, provider_id=self.id), items, strict=True
+            )
+        ]
 
     async def get_object(
         self,
@@ -320,7 +329,7 @@ class NetBoxInventoryProvider(InventoryProvider):
                 context.operation,
             )
         payload = await self._request_json(f"{endpoint}{identifier}/", context)
-        return map_record(payload, mapping, provider_id=self.id)
+        return self._with_provider_url(map_record(payload, mapping, provider_id=self.id), payload)
 
     async def test_connection(self, *, context: ProviderCallContext) -> ProviderTestResult:
         start = monotonic()
@@ -656,7 +665,24 @@ class NetBoxInventoryProvider(InventoryProvider):
             str(tag.get("slug") or tag.get("name") or tag) if isinstance(tag, Mapping) else str(tag)
             for tag in tags
         )
-        descriptive = {"netbox_status": item.get("status"), "native_tags": list(native_tags)}
+        descriptive: dict[str, Any] = {
+            "netbox_status": item.get("status"),
+            "native_tags": list(native_tags),
+        }
+        # NetBox facts the platform's device row has no column for. They stay
+        # searchable (descriptive is GIN-indexed) and visible over the API.
+        for field_key in ("serial", "asset_tag", "rack", "position", "tenant", "location"):
+            value = self._mapped_value(item, field_key, DEFAULT_FIELD_MAP.get(field_key))
+            if value is not None:
+                descriptive[field_key] = value
+        mgmt_host_v6 = _optional_str(
+            self._mapped_value(item, "mgmt_host_v6", DEFAULT_FIELD_MAP["mgmt_host_v6"])
+        )
+        if mgmt_host_v6:
+            descriptive["mgmt_host_v6"] = mgmt_host_v6.split("/")[0]
+        provider_url = self._provider_url(item)
+        if provider_url:
+            descriptive["provider_url"] = provider_url
         return DeviceDescriptor(
             provider_id=self.id,
             external_id=external_id,
@@ -675,7 +701,7 @@ class NetBoxInventoryProvider(InventoryProvider):
             # Map NetBox's native platform slug; when absent, the core inventory
             # service applies the default during materialization.
             platform=platform,
-            vendor=None,
+            vendor=_optional_str(self._mapped_value(item, "vendor", DEFAULT_FIELD_MAP["vendor"])),
             model=model,
             site=site,
             role=str(role) if role else None,
@@ -684,6 +710,36 @@ class NetBoxInventoryProvider(InventoryProvider):
             access_config=validated_access_config,
             descriptive=descriptive,
         )
+
+    def _with_provider_url(
+        self, descriptor: ObjectDescriptor, item: Mapping[str, Any]
+    ) -> ObjectDescriptor:
+        """Attach the object's NetBox UI URL, so generic pages can link back."""
+        provider_url = self._provider_url(item)
+        if not provider_url:
+            return descriptor
+        return replace(
+            descriptor, descriptive={**descriptor.descriptive, "provider_url": provider_url}
+        )
+
+    def _provider_url(self, item: Mapping[str, Any]) -> str | None:
+        """The NetBox UI URL for one object, for an "Open in NetBox" link.
+
+        Preferred source is NetBox's own ``display_url``; older versions only
+        carry the API ``url``, whose ``/api`` prefix is dropped to reach the UI
+        page. Both are pinned to the configured origin, so a NetBox that echoes
+        someone else's host cannot turn the link into an off-site redirect.
+        """
+        for key in ("display_url", "url"):
+            candidate = _optional_str(item.get(key))
+            if not candidate:
+                continue
+            parsed = urlparse(candidate)
+            if self._origin(parsed) != self._origin(urlparse(str(self.config.url))):
+                continue
+            path = parsed.path.replace("/api/", "/", 1) if key == "url" else parsed.path
+            return f"{parsed.scheme}://{parsed.netloc}{path}"
+        return None
 
     def _site_id_path(self) -> str:
         """The site-payload path holding a site's external id.
@@ -741,8 +797,15 @@ class NetBoxInventoryProvider(InventoryProvider):
             name=str(item.get("name") or item.get("display") or external_id),
             parent_external_id=self._site_external_id(parent) if parent else None,
             location=str(item.get("physical_address") or item.get("description") or "") or None,
-            descriptive={"slug": item.get("slug")},
+            descriptive=self._site_descriptive(item),
         )
+
+    def _site_descriptive(self, item: Mapping[str, Any]) -> dict[str, Any]:
+        descriptive: dict[str, Any] = {"slug": item.get("slug")}
+        provider_url = self._provider_url(item)
+        if provider_url:
+            descriptive["provider_url"] = provider_url
+        return descriptive
 
     def _reject_duplicate_external_ids(
         self, descriptors: builtins.list[DeviceDescriptor], operation: str
