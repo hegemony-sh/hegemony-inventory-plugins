@@ -21,6 +21,7 @@ from hegemony_inventory_sdk import (
     DeviceDescriptor,
     InventoryProvider,
     InventoryProviderError,
+    MaintenanceState,
     ObjectDescriptor,
     ObjectFieldMapping,
     PlatformServices,
@@ -709,6 +710,7 @@ class NetBoxInventoryProvider(InventoryProvider):
             native_tags=native_tags,
             access_config=validated_access_config,
             descriptive=descriptive,
+            maintenance_state=self._maintenance_state(item),
         )
 
     def _with_provider_url(
@@ -767,6 +769,22 @@ class NetBoxInventoryProvider(InventoryProvider):
             or _optional_str(item.get("slug"))
             or _optional_str(item.get("name"))
         )
+
+    def _maintenance_state(self, item: Mapping[str, Any]) -> MaintenanceState | None:
+        """Map the NetBox device status onto the platform's maintenance state.
+
+        NetBox statuses arrive as ``{"value": "offline", "label": "Offline"}``, or
+        as a bare slug on older payloads. An unmapped status (``active``, or one a
+        deployment has not configured) yields ``None``, which leaves the device's
+        existing state untouched rather than forcing it back to active.
+        """
+        raw = item.get("status")
+        slug = raw.get("value") if isinstance(raw, Mapping) else raw
+        status = _optional_str(slug)
+        if status is None:
+            return None
+        mapped = self.config.status_map.get(status.lower())
+        return MaintenanceState(mapped) if mapped else None
 
     def _device_tags(self, role: Any, native_tags: tuple[str, ...]) -> dict[str, str]:
         """Build the filterable ``key=value`` tag map for one device.

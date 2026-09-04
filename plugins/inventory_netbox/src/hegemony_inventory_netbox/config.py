@@ -10,6 +10,20 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
+from hegemony_inventory_sdk import MaintenanceState
+
+# NetBox device statuses -> the platform's MaintenanceState. "Gone or going" is
+# disabled; "not yet in service" is maintenance. Anything unlisted (including
+# "active") leaves the device active. Override per provider with ``status_map``.
+DEFAULT_STATUS_MAP = {
+    "offline": "disabled",
+    "decommissioning": "disabled",
+    "planned": "maintenance",
+    "staged": "maintenance",
+    "failed": "maintenance",
+    "inventory": "maintenance",
+}
+
 DEFAULT_FIELD_MAP = {
     "external_id": "id",
     "name": "name",
@@ -83,6 +97,13 @@ class NetBoxProviderConfig(BaseModel):
             "to an empty string to map NetBox tags onto bare keys."
         ),
     )
+    status_map: dict[str, str] = Field(
+        default_factory=lambda: dict(DEFAULT_STATUS_MAP),
+        description=(
+            "Maps a NetBox device status slug to a maintenance state "
+            "(active, maintenance or disabled). Statuses left out stay active."
+        ),
+    )
     field_map: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_FIELD_MAP))
     default_access_config: dict[str, Any] = Field(default_factory=dict)
     query_cache_ttl_seconds: int | None = Field(None, ge=0, le=86400)
@@ -132,6 +153,27 @@ class NetBoxProviderConfig(BaseModel):
         if value is None:
             return ""
         return str(value).strip()
+
+    @field_validator("status_map")
+    @classmethod
+    def validate_status_map(cls, value: dict[str, str]) -> dict[str, str]:
+        """Normalize keys/values and reject states the platform does not model."""
+        allowed = {state.value for state in MaintenanceState}
+        normalized: dict[str, str] = {}
+        for status, state in value.items():
+            if not isinstance(status, str) or not isinstance(state, str):
+                continue
+            status_key = status.strip().lower()
+            state_value = state.strip().lower()
+            if not status_key or not state_value:
+                continue
+            if state_value not in allowed:
+                raise ValueError(
+                    f"status_map['{status_key}'] must be one of {sorted(allowed)}, "
+                    f"got '{state_value}'"
+                )
+            normalized[status_key] = state_value
+        return normalized
 
     @field_validator("field_map")
     @classmethod

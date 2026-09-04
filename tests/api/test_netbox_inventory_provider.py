@@ -14,7 +14,12 @@ import pytest
 from hegemony_inventory_netbox import provider as netbox_provider_module
 from hegemony_inventory_netbox.config import NetBoxProviderConfig
 from hegemony_inventory_netbox.provider import NetBoxInventoryProvider
-from hegemony_inventory_sdk import InventoryProviderError, ProviderCallContext, ProviderErrorCode
+from hegemony_inventory_sdk import (
+    InventoryProviderError,
+    MaintenanceState,
+    ProviderCallContext,
+    ProviderErrorCode,
+)
 from tests.inventory_fakes import FakePlatformServices
 
 
@@ -868,3 +873,57 @@ async def test_netbox_ipam_objects_carry_a_provider_url(
     )
 
     assert objects[0].descriptive["provider_url"] == "https://netbox.example/ipam/vlans/5/"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ({"value": "active", "label": "Active"}, None),
+        ({"value": "offline"}, "disabled"),
+        ({"value": "decommissioning"}, "disabled"),
+        ({"value": "planned"}, "maintenance"),
+        ({"value": "staged"}, "maintenance"),
+        ({"value": "failed"}, "maintenance"),
+        ({"value": "inventory"}, "maintenance"),
+        ("offline", "disabled"),  # older payloads send a bare slug
+        (None, None),
+        ({"value": "something-custom"}, None),
+    ],
+)
+def test_netbox_device_status_maps_to_maintenance_state(status: Any, expected: str | None) -> None:
+    """NetBox lifecycle status becomes the platform's maintenance state.
+
+    An unmapped status yields None so the device's existing state is left alone
+    rather than being forced back to active.
+    """
+    descriptor = _provider()._map_device({"id": 1, "name": "r1", "status": status})
+
+    assert (
+        descriptor.maintenance_state.value if descriptor.maintenance_state else None
+    ) == expected
+
+
+def test_netbox_status_map_is_configurable() -> None:
+    """A deployment can decide what its own statuses mean."""
+    provider = _provider({"status_map": {"active": "maintenance", "offline": "active"}})
+
+    frozen = provider._map_device({"id": 1, "name": "r1", "status": {"value": "active"}})
+    thawed = provider._map_device({"id": 2, "name": "r2", "status": {"value": "offline"}})
+    # 'planned' is no longer in the map, so it stops being mapped at all.
+    unmapped = provider._map_device({"id": 3, "name": "r3", "status": {"value": "planned"}})
+
+    assert frozen.maintenance_state is MaintenanceState.MAINTENANCE
+    assert thawed.maintenance_state is MaintenanceState.ACTIVE
+    assert unmapped.maintenance_state is None
+
+
+def test_netbox_status_map_rejects_an_unknown_maintenance_state() -> None:
+    """Only states the platform models are accepted."""
+    with pytest.raises(ValueError, match="status_map"):
+        NetBoxProviderConfig.model_validate(
+            {
+                "url": "https://netbox.example",
+                "token_ref": "{{ secret('vault://netbox/token') }}",
+                "status_map": {"offline": "quarantined"},
+            }
+        )

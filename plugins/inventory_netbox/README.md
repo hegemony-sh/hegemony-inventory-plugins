@@ -36,6 +36,7 @@ rendered automatically and `token_ref` gets a secret picker.
 | `verify_tls` | no | `true` | Verify the TLS certificate |
 | `device_query` | no | `""` | NetBox device filter applied to **every** device read, e.g. `status=active&role=wan-edge` |
 | `tag_key_prefix` | no | `tag:` | Prefix for NetBox tag slugs surfaced as filterable device tags. Set to `""` for bare keys |
+| `status_map` | no | built-in | Maps a NetBox device status slug to a maintenance state (`active`, `maintenance`, `disabled`) |
 | `field_map` | no | built-in | Maps normalized inventory fields → NetBox REST payload paths, including optional `access_config.*` refs under `custom_fields` |
 | `default_access_config` | no | `{}` | Access-config defaults applied to every device |
 | `query_cache_ttl_seconds` | no | `null` | Optional query cache TTL (0–86400 s) |
@@ -86,6 +87,21 @@ The device `platform` is mapped from NetBox's native `platform.slug`. When a dev
 no platform in NetBox, the provider emits no value and the **core inventory service**
 applies its default platform during materialization — there is no per-provider platform
 setting.
+
+### Device lifecycle status
+
+NetBox's device status is mapped onto the platform's maintenance state, so the source
+of truth's view of a device's lifecycle travels with it:
+
+| NetBox status | Maintenance state |
+|---|---|
+| `offline`, `decommissioning` | `disabled` |
+| `planned`, `staged`, `failed`, `inventory` | `maintenance` |
+| `active`, anything unmapped | *(left alone)* |
+
+An unmapped status yields no value rather than forcing the device back to `active`, so a
+locally-set state is not overwritten by a sync. Override the table per provider with
+`status_map`; only `active`, `maintenance` and `disabled` are accepted as targets.
 
 ### Scoping what syncs
 

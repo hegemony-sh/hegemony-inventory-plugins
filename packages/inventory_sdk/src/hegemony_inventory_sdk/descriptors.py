@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from .enums import ResourceType
+from .enums import MaintenanceState, ResourceType
 
 AccessConfig = dict[str, Any]
 
@@ -112,6 +112,11 @@ class DeviceDescriptor:
     access_config: AccessConfig = field(default_factory=dict)
     descriptive: dict[str, Any] = field(default_factory=dict)
     source_version: dict[str, Any] = field(default_factory=dict)
+    # Optional: the source system's lifecycle state for this device, normalized to
+    # ``MaintenanceState``. Providers emit it when the source models one (a NetBox
+    # device status, say) and leave it unset otherwise; the core inventory service
+    # keeps the row's existing state when it is ``None``.
+    maintenance_state: MaintenanceState | None = None
 
     @property
     def safe_display_name(self) -> str:
@@ -165,6 +170,9 @@ def device_to_object_descriptor(device: DeviceDescriptor) -> ObjectDescriptor:
         "role": device.role,
         "tags": dict(device.tags),
         "native_tags": list(device.native_tags),
+        "maintenance_state": device.maintenance_state.value
+        if device.maintenance_state is not None
+        else None,
     }
     return ObjectDescriptor(
         provider_id=device.provider_id,
