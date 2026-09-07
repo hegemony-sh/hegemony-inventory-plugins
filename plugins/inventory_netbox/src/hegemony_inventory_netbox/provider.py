@@ -228,9 +228,45 @@ class NetBoxInventoryProvider(InventoryProvider):
             payload = await self._request_json(f"/api/dcim/devices/{external_id}/", context)
             return self._map_device(payload)
         if resource_type == ResourceType.SITE:
-            payload = await self._request_json(f"/api/dcim/sites/{external_id}/", context)
-            return self._map_site(payload)
+            return await self._get_site(external_id, context)
         raise ValueError(f"Unsupported resource type: {resource_type}")
+
+    async def _get_site(self, external_id: str, context: ProviderCallContext) -> SiteRef:
+        """Read one site, resolving a non-numeric external id through a filter first.
+
+        NetBox's detail route is keyed by the numeric primary key, but a site's
+        external id follows ``field_map['site.external_id']`` — ``site.slug`` by
+        default. Sending a slug to ``/api/dcim/sites/<slug>/`` is a 404, so
+        anything other than the numeric ``id`` is looked up through the list
+        endpoint and matched on the same key ``list_sites`` emitted.
+        """
+        identifier = str(external_id).strip()
+        if not identifier:
+            raise self._error(
+                ProviderErrorCode.NOT_FOUND,
+                "NetBox site id is empty",
+                context.operation,
+            )
+        id_path = self._site_id_path()
+        if id_path == "id":
+            payload = await self._request_json(
+                f"/api/dcim/sites/{quote(identifier, safe='')}/", context
+            )
+            return self._map_site(payload)
+        # A dotted path has no NetBox filter of the same name, so only the leaf
+        # is usable as one; `slug` and `name` — the realistic keys — are leaves.
+        field = id_path.rpartition(".")[2]
+        matches = await self._fetch_sites(
+            _query_to_expr({field: identifier}), limit=2, context=context
+        )
+        for site in matches:
+            if site.external_id == identifier:
+                return site
+        raise self._error(
+            ProviderErrorCode.NOT_FOUND,
+            f"No NetBox site with {field}={identifier!r}",
+            context.operation,
+        )
 
     async def query_devices(
         self, expr: str, *, limit: int | None = None, context: ProviderCallContext
@@ -795,6 +831,11 @@ class NetBoxInventoryProvider(InventoryProvider):
         The prefix keeps a tag named ``role`` from colliding with the role entry
         and is configurable via ``tag_key_prefix``; set it to an empty string to
         map NetBox tags onto bare keys.
+
+        An already-present key always wins, which is what keeps the mapped role
+        authoritative when the prefix is empty and NetBox happens to carry a tag
+        named ``role``. Without that, ``tags[role]`` would read ``true`` instead
+        of the device's role and every role filter would miss the device.
         """
         tags: dict[str, str] = {}
         if role:
@@ -802,7 +843,7 @@ class NetBoxInventoryProvider(InventoryProvider):
         prefix = self.config.tag_key_prefix
         for slug in native_tags:
             key = f"{prefix}{slug}".strip()
-            if slug and key:
+            if slug and key and key not in tags:
                 tags[key] = "true"
         return tags
 

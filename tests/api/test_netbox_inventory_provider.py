@@ -19,6 +19,8 @@ from hegemony_inventory_sdk import (
     MaintenanceState,
     ProviderCallContext,
     ProviderErrorCode,
+    ResourceType,
+    SiteRef,
 )
 from tests.inventory_fakes import FakePlatformServices
 
@@ -927,3 +929,100 @@ def test_netbox_status_map_rejects_an_unknown_maintenance_state() -> None:
                 "status_map": {"offline": "quarantined"},
             }
         )
+
+
+@pytest.mark.asyncio
+async def test_netbox_get_site_resolves_a_slug_through_the_list_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default site key is a slug, which NetBox's detail route cannot take.
+
+    ``list_sites`` emits ``field_map['site.external_id']`` — ``site.slug`` by
+    default — so a detail read of the value it just handed out would hit
+    ``/api/dcim/sites/prg1/`` and 404. It has to go through a filter first.
+    """
+    provider = _provider(token="netbox-token")
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _json_transport(
+            {
+                "/api/dcim/sites/": {
+                    "results": [{"id": 7, "slug": "prg1", "name": "Prague 1"}],
+                    "next": None,
+                }
+            },
+            seen,
+        ),
+    )
+
+    site = await provider.get(
+        ResourceType.SITE,
+        "prg1",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="get"),
+    )
+
+    assert seen == ["https://netbox.example/api/dcim/sites/?slug=prg1"]
+    assert isinstance(site, SiteRef)
+    assert site.external_id == "prg1"
+    assert site.name == "Prague 1"
+
+
+@pytest.mark.asyncio
+async def test_netbox_get_site_uses_the_detail_route_when_keyed_by_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remapping the key to the numeric id keeps the cheaper single-object read."""
+    provider = _provider({"field_map": {"site.external_id": "site.id"}}, token="netbox-token")
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _json_transport(
+            {"/api/dcim/sites/7/": {"id": 7, "slug": "prg1", "name": "Prague 1"}}, seen
+        ),
+    )
+
+    site = await provider.get(
+        ResourceType.SITE,
+        "7",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="get"),
+    )
+
+    assert seen == ["https://netbox.example/api/dcim/sites/7/"]
+    assert isinstance(site, SiteRef)
+    assert site.external_id == "7"
+
+
+@pytest.mark.asyncio
+async def test_netbox_get_site_fails_closed_when_the_filter_matches_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slug NetBox does not know is NOT_FOUND, not a mis-keyed match."""
+    provider = _provider(token="netbox-token")
+    _install_transport(
+        monkeypatch,
+        _json_transport({"/api/dcim/sites/": {"results": [], "next": None}}),
+    )
+
+    with pytest.raises(InventoryProviderError) as excinfo:
+        await provider.get(
+            ResourceType.SITE,
+            "nope",
+            context=ProviderCallContext(provider_id="netbox:primary", operation="get"),
+        )
+
+    assert excinfo.value.envelope.code == ProviderErrorCode.NOT_FOUND
+
+
+def test_netbox_a_native_tag_never_overwrites_the_mapped_role() -> None:
+    """With an empty prefix, a NetBox tag named ``role`` must lose to the role.
+
+    ``tag_key_prefix: ""`` is documented as supported, and the collision it
+    reopens would leave ``tags[role]`` reading ``"true"`` instead of the role —
+    silently dropping the device out of every role filter.
+    """
+    device = _provider({"tag_key_prefix": ""})._map_device(
+        {"id": 1, "name": "r1", "role": {"slug": "edge"}, "tags": [{"slug": "role"}]}
+    )
+
+    assert device.tags == {"role": "edge"}
