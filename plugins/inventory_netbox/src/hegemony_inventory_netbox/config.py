@@ -6,9 +6,23 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+
+from hegemony_inventory_sdk import MaintenanceState
+
+# NetBox device statuses -> the platform's MaintenanceState. "Gone or going" is
+# disabled; "not yet in service" is maintenance. Anything unlisted (including
+# "active") leaves the device active. Override per provider with ``status_map``.
+DEFAULT_STATUS_MAP = {
+    "offline": "disabled",
+    "decommissioning": "disabled",
+    "planned": "maintenance",
+    "staged": "maintenance",
+    "failed": "maintenance",
+    "inventory": "maintenance",
+}
 
 DEFAULT_FIELD_MAP = {
     "external_id": "id",
@@ -18,6 +32,16 @@ DEFAULT_FIELD_MAP = {
     "mgmt_host": "primary_ip4.address",
     "platform": "platform.slug",
     "model": "device_type.model",
+    "vendor": "device_type.manufacturer.name",
+    # Surfaced under ``descriptive`` — the platform's device row has no column
+    # for these, but they are searchable there and visible over the API.
+    "serial": "serial",
+    "asset_tag": "asset_tag",
+    "rack": "rack.name",
+    "position": "position",
+    "tenant": "tenant.slug",
+    "location": "location.slug",
+    "mgmt_host_v6": "primary_ip6.address",
     "site.external_id": "site.slug",
     "site.name": "site.name",
     "role": "role.slug",
@@ -54,6 +78,45 @@ class NetBoxProviderConfig(BaseModel):
         description="Fallback Authorization schemes retried after auth failures when the token is unprefixed.",
     )
     verify_tls: bool = True
+    device_query: str = Field(
+        "",
+        max_length=2048,
+        description=(
+            "NetBox device filter applied to every device read, e.g. "
+            "'status=active&role=wan-edge'. Auto-sync otherwise pulls the entire "
+            "device table. A caller-supplied query is appended to this one."
+        ),
+    )
+    site_tree_source: Literal["region", "site_group", "none"] = Field(
+        "region",
+        description=(
+            "Which NetBox hierarchy becomes the platform's site tree. NetBox keeps "
+            "TWO independent nested hierarchies above a site -- Region (geography) "
+            "and Site Group (function) -- while a platform site has a single parent, "
+            "so one of them has to be chosen. Regardless of the choice, BOTH are "
+            "always surfaced as site tags ('region' and 'group'), so picking one "
+            "never loses the other: the unchosen axis stays available for filtering. "
+            "'none' reproduces the flat list this provider produced before the tree "
+            "was mapped at all."
+        ),
+    )
+    tag_key_prefix: str = Field(
+        "tag:",
+        max_length=32,
+        description=(
+            "Prefix for NetBox tag slugs surfaced as filterable device tags, e.g. the "
+            "NetBox tag 'core' becomes tags['tag:core'] = 'true'. The prefix keeps a "
+            "NetBox tag named 'role' from colliding with the mapped device role; set it "
+            "to an empty string to map NetBox tags onto bare keys."
+        ),
+    )
+    status_map: dict[str, str] = Field(
+        default_factory=lambda: dict(DEFAULT_STATUS_MAP),
+        description=(
+            "Maps a NetBox device status slug to a maintenance state "
+            "(active, maintenance or disabled). Statuses left out stay active."
+        ),
+    )
     field_map: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_FIELD_MAP))
     default_access_config: dict[str, Any] = Field(default_factory=dict)
     query_cache_ttl_seconds: int | None = Field(None, ge=0, le=86400)
@@ -88,6 +151,42 @@ class NetBoxProviderConfig(BaseModel):
         else:
             raise ValueError("auth_fallback_schemes must be a list or comma-separated string")
         return [item for item in candidates if item]
+
+    @field_validator("device_query", mode="before")
+    @classmethod
+    def normalize_device_query(cls, value: Any) -> str:
+        """Accept a leading '?' and surrounding whitespace."""
+        if value is None:
+            return ""
+        return str(value).strip().lstrip("?").strip()
+
+    @field_validator("tag_key_prefix", mode="before")
+    @classmethod
+    def normalize_tag_key_prefix(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @field_validator("status_map")
+    @classmethod
+    def validate_status_map(cls, value: dict[str, str]) -> dict[str, str]:
+        """Normalize keys/values and reject states the platform does not model."""
+        allowed = {state.value for state in MaintenanceState}
+        normalized: dict[str, str] = {}
+        for status, state in value.items():
+            if not isinstance(status, str) or not isinstance(state, str):
+                continue
+            status_key = status.strip().lower()
+            state_value = state.strip().lower()
+            if not status_key or not state_value:
+                continue
+            if state_value not in allowed:
+                raise ValueError(
+                    f"status_map['{status_key}'] must be one of {sorted(allowed)}, "
+                    f"got '{state_value}'"
+                )
+            normalized[status_key] = state_value
+        return normalized
 
     @field_validator("field_map")
     @classmethod

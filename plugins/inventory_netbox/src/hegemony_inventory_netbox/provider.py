@@ -9,9 +9,10 @@ from __future__ import annotations
 import asyncio
 import builtins
 from collections.abc import Mapping
+from dataclasses import replace
 from time import monotonic
 from typing import Any
-from urllib.parse import ParseResult, urljoin, urlparse
+from urllib.parse import ParseResult, quote, urlencode, urljoin, urlparse
 
 import httpx
 
@@ -20,6 +21,7 @@ from hegemony_inventory_sdk import (
     DeviceDescriptor,
     InventoryProvider,
     InventoryProviderError,
+    MaintenanceState,
     ObjectDescriptor,
     ObjectFieldMapping,
     PlatformServices,
@@ -30,12 +32,33 @@ from hegemony_inventory_sdk import (
     ResourceRef,
     ResourceType,
     SiteRef,
+    map_record,
     map_records,
 )
 
 from .config import DEFAULT_FIELD_MAP, NetBoxProviderConfig
 
 KNOWN_AUTH_SCHEMES = frozenset({"bearer", "token", "basic"})
+
+
+def _query_to_expr(query: Mapping[str, Any] | None) -> str:
+    """Render a query mapping as a URL-encoded NetBox querystring.
+
+    A sequence value repeats its key the way NetBox's filter DSL expects
+    (``?tag=core&tag=wan``); ``None`` values are dropped rather than sent as the
+    string "None".
+    """
+    if not query:
+        return ""
+    pairs: list[tuple[str, str]] = []
+    for key, value in query.items():
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            pairs.extend((str(key), str(item)) for item in value if item is not None)
+        else:
+            pairs.append((str(key), str(value)))
+    return urlencode(pairs)
 
 
 def _optional_str(value: Any) -> str | None:
@@ -91,7 +114,15 @@ _IPAM_OBJECT_SOURCES: dict[str, tuple[str, ObjectFieldMapping]] = {
                 "status": "status.value",
                 "vlan": "vlan.vid",
                 "role": "role.slug",
+                # NetBox 4.2 replaced Prefix.site with a generic scope, which can be a
+                # site, a region, a site group or a location. Both spellings are mapped:
+                # `site` still resolves on a pre-4.2 NetBox and is simply absent after,
+                # and `scope`/`scope_type` carry the newer shape -- with the type named,
+                # because a bare slug labelled "site" would be a lie when the prefix is
+                # actually scoped to a region.
                 "site": "site.slug",
+                "scope": "scope.name",
+                "scope_type": "scope_type",
                 "tenant": "tenant.slug",
                 "is_pool": "is_pool",
                 "description": "description",
@@ -136,6 +167,25 @@ _IPAM_OBJECT_SOURCES: dict[str, tuple[str, ObjectFieldMapping]] = {
 }
 
 
+# NetBox keeps TWO independent nested hierarchies above a site -- Region
+# (geography) and SiteGroup (function) -- and a site carries a nullable foreign
+# key to each. A platform Site has a single ``parent_id``, so the two cannot both
+# be projected onto it: combining them would mean inventing "Region x Group"
+# nodes that exist in neither system. ``site_tree_source`` picks one; the other
+# is surfaced as a site tag, so the choice never loses information.
+#
+# NetBox slugs are unique per model rather than globally -- a region and a site
+# may both be "gondor" -- and the platform keys sites on (provider_id,
+# external_id), so the synthesized nodes carry a prefix. It must be the same
+# prefix everywhere: in the parent link, in the node's own id, and in _get_site.
+#
+# config value -> (site payload key, list endpoint, external-id prefix, node kind)
+_SITE_TREE_SOURCES: dict[str, tuple[str, str, str, str]] = {
+    "region": ("region", "/api/dcim/regions/", "region:", "region"),
+    "site_group": ("group", "/api/dcim/site-groups/", "site-group:", "site_group"),
+}
+
+
 class NetBoxInventoryProvider(InventoryProvider):
     provider_type = "netbox"
     capabilities = frozenset({Capability.READ, Capability.QUERY})
@@ -175,7 +225,9 @@ class NetBoxInventoryProvider(InventoryProvider):
                     display_name=d.safe_display_name,
                     descriptive=d.descriptive,
                 )
-                for d in await self.query_devices("", limit=limit, context=context)
+                for d in await self.query_devices(
+                    _query_to_expr(query), limit=limit, context=context
+                )
             ]
         if resource_type == ResourceType.SITE:
             return [
@@ -186,7 +238,9 @@ class NetBoxInventoryProvider(InventoryProvider):
                     display_name=s.name,
                     descriptive=s.descriptive,
                 )
-                for s in await self.list_sites(limit=limit, context=context)
+                for s in await self._sites_with_tree(
+                    _query_to_expr(query), limit=limit, context=context
+                )
             ]
         return []
 
@@ -201,9 +255,74 @@ class NetBoxInventoryProvider(InventoryProvider):
             payload = await self._request_json(f"/api/dcim/devices/{external_id}/", context)
             return self._map_device(payload)
         if resource_type == ResourceType.SITE:
-            payload = await self._request_json(f"/api/dcim/sites/{external_id}/", context)
-            return self._map_site(payload)
+            return await self._get_site(external_id, context)
         raise ValueError(f"Unsupported resource type: {resource_type}")
+
+    async def _get_site(self, external_id: str, context: ProviderCallContext) -> SiteRef:
+        """Read one site, resolving a non-numeric external id through a filter first.
+
+        NetBox's detail route is keyed by the numeric primary key, but a site's
+        external id follows ``field_map['site.external_id']`` — ``site.slug`` by
+        default. Sending a slug to ``/api/dcim/sites/<slug>/`` is a 404, so
+        anything other than the numeric ``id`` is looked up through the list
+        endpoint and matched on the same key ``list_sites`` emitted.
+        """
+        identifier = str(external_id).strip()
+        if not identifier:
+            raise self._error(
+                ProviderErrorCode.NOT_FOUND,
+                "NetBox site id is empty",
+                context.operation,
+            )
+        # A hierarchy node is resolved from its own endpoint. Every prefix is
+        # tried, not only the configured one: a region row materialized under an
+        # earlier `site_tree_source` still has to open rather than 404 after the
+        # setting changes.
+        node = await self._get_tree_node(identifier, context)
+        if node is not None:
+            return node
+        id_path = self._site_id_path()
+        if id_path == "id":
+            payload = await self._request_json(
+                f"/api/dcim/sites/{quote(identifier, safe='')}/", context
+            )
+            return self._map_site(payload)
+        # A dotted path has no NetBox filter of the same name, so only the leaf
+        # is usable as one; `slug` and `name` — the realistic keys — are leaves.
+        field = id_path.rpartition(".")[2]
+        matches = await self._fetch_sites(
+            _query_to_expr({field: identifier}), limit=2, context=context
+        )
+        for site in matches:
+            if site.external_id == identifier:
+                return site
+        raise self._error(
+            ProviderErrorCode.NOT_FOUND,
+            f"No NetBox site with {field}={identifier!r}",
+            context.operation,
+        )
+
+    async def _get_tree_node(self, identifier: str, context: ProviderCallContext) -> SiteRef | None:
+        """Resolve a synthesized hierarchy id, or None when it is not one."""
+        for _payload_key, path, prefix, kind in _SITE_TREE_SOURCES.values():
+            if not identifier.startswith(prefix):
+                continue
+            slug = identifier[len(prefix) :]
+            items = await self._paginated(
+                f"{path}?slug={quote(slug, safe='')}",
+                context,
+                page_limit=1,
+                result_limit=2,
+            )
+            for item in items:
+                if _optional_str(item.get("slug")) == slug:
+                    return self._map_tree_node(item, prefix=prefix, kind=kind)
+            raise self._error(
+                ProviderErrorCode.NOT_FOUND,
+                f"No NetBox {kind} with slug={slug!r}",
+                context.operation,
+            )
+        return None
 
     async def query_devices(
         self, expr: str, *, limit: int | None = None, context: ProviderCallContext
@@ -211,9 +330,12 @@ class NetBoxInventoryProvider(InventoryProvider):
         page_limit = self._services.limits.max_provider_pages
         result_limit = limit or self._services.limits.max_run_targets
         path = "/api/dcim/devices/"
-        query = expr.lstrip("?")
-        if query:
-            path = f"{path}?{query}"
+        # The configured baseline narrows every device read (auto-sync calls this
+        # with an empty expression, so without it a sync pulls the whole table);
+        # a caller expression is appended, and NetBox ANDs the two.
+        parts = [part for part in (self.config.device_query, expr.lstrip("?")) if part]
+        if parts:
+            path = f"{path}?{'&'.join(parts)}"
         items = await self._paginated(
             path, context, page_limit=page_limit, result_limit=result_limit
         )
@@ -224,13 +346,122 @@ class NetBoxInventoryProvider(InventoryProvider):
     async def list_sites(
         self, *, limit: int | None = None, context: ProviderCallContext
     ) -> builtins.list[SiteRef]:
-        items = await self._paginated(
-            "/api/dcim/sites/",
+        return await self._sites_with_tree("", limit=limit, context=context)
+
+    async def _sites_with_tree(
+        self, expr: str, *, limit: int | None, context: ProviderCallContext
+    ) -> builtins.list[SiteRef]:
+        """The sites, preceded by the hierarchy nodes they hang from.
+
+        Both halves go out together on every call, and that is not incidental:
+        the platform marks any provider site a sync stops reporting as stale, so
+        a node emitted once and then omitted would flap. It is also why the nodes
+        are recomputed from the sites each time rather than cached.
+
+        The nodes are extra, on top of ``limit``. The limit is a bound on how many
+        *sites* a caller asked for, and returning a site whose parent was trimmed
+        away would flatten it for no reason the caller could see.
+        """
+        payloads = await self._fetch_site_payloads(expr, limit=limit, context=context)
+        nodes = await self._site_tree_nodes(payloads, context)
+        return nodes + [self._map_site(item) for item in payloads]
+
+    async def _fetch_sites(
+        self, expr: str, *, limit: int | None, context: ProviderCallContext
+    ) -> builtins.list[SiteRef]:
+        """The sites alone, with no hierarchy nodes.
+
+        Used where a caller is resolving one known site rather than browsing, so
+        the extra request for the hierarchy would buy nothing.
+        """
+        payloads = await self._fetch_site_payloads(expr, limit=limit, context=context)
+        return [self._map_site(item) for item in payloads]
+
+    async def _fetch_site_payloads(
+        self, expr: str, *, limit: int | None, context: ProviderCallContext
+    ) -> builtins.list[dict[str, Any]]:
+        """Raw site payloads, optionally narrowed by a NetBox filter expression."""
+        path = "/api/dcim/sites/"
+        query = expr.lstrip("?")
+        if query:
+            path = f"{path}?{query}"
+        return await self._paginated(
+            path,
             context,
             page_limit=self._services.limits.max_provider_pages,
             result_limit=limit or self._services.limits.max_preview_devices,
         )
-        return [self._map_site(item) for item in items]
+
+    async def _site_tree_nodes(
+        self, payloads: builtins.list[dict[str, Any]], context: ProviderCallContext
+    ) -> builtins.list[SiteRef]:
+        """The ancestor closure of the hierarchy nodes these sites belong to.
+
+        Only ancestors of the sites actually synced are emitted. NetBox's region
+        tree can describe the whole world, and a provider scoped to six sites has
+        no business dragging all of it into the platform's inventory.
+        """
+        source = _SITE_TREE_SOURCES.get(self.config.site_tree_source)
+        if source is None:
+            return []
+        payload_key, path, prefix, kind = source
+
+        referenced = {
+            slug
+            for item in payloads
+            if isinstance(item.get(payload_key), Mapping)
+            and (slug := _optional_str(item[payload_key].get("slug")))
+        }
+        if not referenced:
+            return []
+
+        items = await self._paginated(
+            path,
+            context,
+            page_limit=self._services.limits.max_provider_pages,
+            result_limit=self._services.limits.max_preview_devices,
+        )
+        by_slug = {
+            slug: item for item in items if (slug := _optional_str(item.get("slug"))) is not None
+        }
+
+        wanted: set[str] = set()
+        for slug in referenced:
+            cursor: str | None = slug
+            # NetBox's own tree cannot contain a cycle, but this walks data from
+            # a remote system and a cycle here would hang the sync rather than
+            # fail it, so the walk stops at the first repeat.
+            while cursor is not None and cursor in by_slug and cursor not in wanted:
+                wanted.add(cursor)
+                parent = by_slug[cursor].get("parent")
+                cursor = _optional_str(parent.get("slug")) if isinstance(parent, Mapping) else None
+
+        return [
+            self._map_tree_node(by_slug[slug], prefix=prefix, kind=kind) for slug in sorted(wanted)
+        ]
+
+    def _map_tree_node(self, item: Mapping[str, Any], *, prefix: str, kind: str) -> SiteRef:
+        """One region or site group, as a site that other sites hang from.
+
+        ``node_type`` is carried in both tags and descriptive so that a selector
+        or a UI can tell an aggregation node from a place with equipment in it.
+        """
+        slug = _optional_str(item.get("slug")) or ""
+        parent = item.get("parent")
+        parent_slug = _optional_str(parent.get("slug")) if isinstance(parent, Mapping) else None
+        descriptive: dict[str, Any] = {"slug": slug, "node_type": kind}
+        provider_url = self._provider_url(item)
+        if provider_url:
+            descriptive["provider_url"] = provider_url
+        return SiteRef(
+            provider_id=self.id,
+            external_id=f"{prefix}{slug}",
+            name=str(item.get("name") or item.get("display") or slug),
+            parent_external_id=f"{prefix}{parent_slug}" if parent_slug else None,
+            location=_optional_str(item.get("description")),
+            tags={"node_type": kind},
+            descriptive=descriptive,
+        )
 
     async def list_objects(
         self,
@@ -249,13 +480,48 @@ class NetBoxInventoryProvider(InventoryProvider):
                 object_type, query, limit=limit, cursor=cursor, context=context
             )
         endpoint, mapping = source
+        expr = _query_to_expr(query)
+        path = f"{endpoint}?{expr}" if expr else endpoint
         items = await self._paginated(
-            endpoint,
+            path,
             context,
             page_limit=self._services.limits.max_provider_pages,
             result_limit=limit or self._services.limits.max_run_targets,
         )
-        return map_records(items, mapping, provider_id=self.id)
+        return [
+            self._with_provider_url(descriptor, item)
+            for descriptor, item in zip(
+                map_records(items, mapping, provider_id=self.id), items, strict=True
+            )
+        ]
+
+    async def get_object(
+        self,
+        object_type: str,
+        external_id: str,
+        *,
+        context: ProviderCallContext,
+    ) -> ObjectDescriptor:
+        """Fetch one object of ``object_type``.
+
+        The IPAM types are served from the same endpoint/mapping table as
+        ``list_objects``; without this override they fell through to the SDK
+        default, which only knows device and site, so every IPAM detail page
+        raised "not supported".
+        """
+        source = _IPAM_OBJECT_SOURCES.get(object_type)
+        if source is None:
+            return await super().get_object(object_type, external_id, context=context)
+        endpoint, mapping = source
+        identifier = quote(str(external_id).strip(), safe="")
+        if not identifier:
+            raise self._error(
+                ProviderErrorCode.NOT_FOUND,
+                "NetBox object id is empty",
+                context.operation,
+            )
+        payload = await self._request_json(f"{endpoint}{identifier}/", context)
+        return self._with_provider_url(map_record(payload, mapping, provider_id=self.id), payload)
 
     async def test_connection(self, *, context: ProviderCallContext) -> ProviderTestResult:
         start = monotonic()
@@ -591,7 +857,24 @@ class NetBoxInventoryProvider(InventoryProvider):
             str(tag.get("slug") or tag.get("name") or tag) if isinstance(tag, Mapping) else str(tag)
             for tag in tags
         )
-        descriptive = {"netbox_status": item.get("status"), "native_tags": list(native_tags)}
+        descriptive: dict[str, Any] = {
+            "netbox_status": item.get("status"),
+            "native_tags": list(native_tags),
+        }
+        # NetBox facts the platform's device row has no column for. They stay
+        # searchable (descriptive is GIN-indexed) and visible over the API.
+        for field_key in ("serial", "asset_tag", "rack", "position", "tenant", "location"):
+            value = self._mapped_value(item, field_key, DEFAULT_FIELD_MAP.get(field_key))
+            if value is not None:
+                descriptive[field_key] = value
+        mgmt_host_v6 = _optional_str(
+            self._mapped_value(item, "mgmt_host_v6", DEFAULT_FIELD_MAP["mgmt_host_v6"])
+        )
+        if mgmt_host_v6:
+            descriptive["mgmt_host_v6"] = mgmt_host_v6.split("/")[0]
+        provider_url = self._provider_url(item)
+        if provider_url:
+            descriptive["provider_url"] = provider_url
         return DeviceDescriptor(
             provider_id=self.id,
             external_id=external_id,
@@ -610,27 +893,167 @@ class NetBoxInventoryProvider(InventoryProvider):
             # Map NetBox's native platform slug; when absent, the core inventory
             # service applies the default during materialization.
             platform=platform,
-            vendor=None,
+            vendor=_optional_str(self._mapped_value(item, "vendor", DEFAULT_FIELD_MAP["vendor"])),
             model=model,
             site=site,
             role=str(role) if role else None,
-            tags={"role": str(role)} if role else {},
+            tags=self._device_tags(role, native_tags),
             native_tags=native_tags,
             access_config=validated_access_config,
             descriptive=descriptive,
+            maintenance_state=self._maintenance_state(item),
         )
 
+    def _with_provider_url(
+        self, descriptor: ObjectDescriptor, item: Mapping[str, Any]
+    ) -> ObjectDescriptor:
+        """Attach the object's NetBox UI URL, so generic pages can link back."""
+        provider_url = self._provider_url(item)
+        if not provider_url:
+            return descriptor
+        return replace(
+            descriptor, descriptive={**descriptor.descriptive, "provider_url": provider_url}
+        )
+
+    def _provider_url(self, item: Mapping[str, Any]) -> str | None:
+        """The NetBox UI URL for one object, for an "Open in NetBox" link.
+
+        Preferred source is NetBox's own ``display_url``; older versions only
+        carry the API ``url``, whose ``/api`` prefix is dropped to reach the UI
+        page. Both are pinned to the configured origin, so a NetBox that echoes
+        someone else's host cannot turn the link into an off-site redirect.
+        """
+        for key in ("display_url", "url"):
+            candidate = _optional_str(item.get(key))
+            if not candidate:
+                continue
+            parsed = urlparse(candidate)
+            if self._origin(parsed) != self._origin(urlparse(str(self.config.url))):
+                continue
+            path = parsed.path.replace("/api/", "/", 1) if key == "url" else parsed.path
+            return f"{parsed.scheme}://{parsed.netloc}{path}"
+        return None
+
+    def _site_id_path(self) -> str:
+        """The site-payload path holding a site's external id.
+
+        Derived from the same ``field_map['site.external_id']`` entry ``_map_device``
+        reads, minus its leading ``site.`` segment, so a site fetched from
+        ``/api/dcim/sites/`` and the same site nested inside a device key on the
+        identical value. When the two disagreed (numeric ``id`` here, ``slug``
+        there) the platform materialized every NetBox site twice and attached
+        devices to the copy that carried no parent link or location.
+        """
+        path = (
+            self.config.field_map.get("site.external_id") or DEFAULT_FIELD_MAP["site.external_id"]
+        )
+        prefix, separator, remainder = path.partition(".")
+        if separator and prefix == "site" and remainder:
+            return remainder
+        return path
+
+    def _site_external_id(self, item: Mapping[str, Any]) -> str | None:
+        """Resolve one site payload's external id through :meth:`_site_id_path`."""
+        return (
+            _optional_str(_lookup_path(item, self._site_id_path()))
+            or _optional_str(item.get("id"))
+            or _optional_str(item.get("slug"))
+            or _optional_str(item.get("name"))
+        )
+
+    def _maintenance_state(self, item: Mapping[str, Any]) -> MaintenanceState | None:
+        """Map the NetBox device status onto the platform's maintenance state.
+
+        NetBox statuses arrive as ``{"value": "offline", "label": "Offline"}``, or
+        as a bare slug on older payloads. An unmapped status (``active``, or one a
+        deployment has not configured) yields ``None``, which leaves the device's
+        existing state untouched rather than forcing it back to active.
+        """
+        raw = item.get("status")
+        slug = raw.get("value") if isinstance(raw, Mapping) else raw
+        status = _optional_str(slug)
+        if status is None:
+            return None
+        mapped = self.config.status_map.get(status.lower())
+        return MaintenanceState(mapped) if mapped else None
+
+    def _device_tags(self, role: Any, native_tags: tuple[str, ...]) -> dict[str, str]:
+        """Build the filterable ``key=value`` tag map for one device.
+
+        NetBox tags are flat slugs, but the platform filters devices on a
+        ``key=value`` map (``tags[role]=core`` in device search, ``tag.*`` in run
+        forms). Each NetBox tag is therefore surfaced as ``<prefix><slug>=true``.
+        The prefix keeps a tag named ``role`` from colliding with the role entry
+        and is configurable via ``tag_key_prefix``; set it to an empty string to
+        map NetBox tags onto bare keys.
+
+        An already-present key always wins, which is what keeps the mapped role
+        authoritative when the prefix is empty and NetBox happens to carry a tag
+        named ``role``. Without that, ``tags[role]`` would read ``true`` instead
+        of the device's role and every role filter would miss the device.
+        """
+        tags: dict[str, str] = {}
+        if role:
+            tags["role"] = str(role)
+        prefix = self.config.tag_key_prefix
+        for slug in native_tags:
+            key = f"{prefix}{slug}".strip()
+            if slug and key and key not in tags:
+                tags[key] = "true"
+        return tags
+
     def _map_site(self, item: Mapping[str, Any]) -> SiteRef:
-        external_id = str(item.get("id") or item.get("slug") or item.get("name") or "")
-        parent = item.get("parent") if isinstance(item.get("parent"), Mapping) else None
+        external_id = self._site_external_id(item) or ""
         return SiteRef(
             provider_id=self.id,
             external_id=external_id,
             name=str(item.get("name") or item.get("display") or external_id),
-            parent_external_id=str(parent.get("id") or parent.get("slug")) if parent else None,
+            parent_external_id=self._site_parent_external_id(item),
             location=str(item.get("physical_address") or item.get("description") or "") or None,
-            descriptive={"slug": item.get("slug")},
+            tags=self._site_tags(item),
+            descriptive=self._site_descriptive(item),
         )
+
+    def _site_parent_external_id(self, item: Mapping[str, Any]) -> str | None:
+        """Where this site hangs in the tree, per ``site_tree_source``.
+
+        A NetBox site has no ``parent`` of its own -- the hierarchy is the region
+        or the site group it points at -- so the id returned here is the
+        synthesized one ``_map_tree_node`` gives that node, prefix included.
+        """
+        source = _SITE_TREE_SOURCES.get(self.config.site_tree_source)
+        if source is not None:
+            payload_key, _, prefix, _kind = source
+            node = item.get(payload_key)
+            if isinstance(node, Mapping) and (slug := _optional_str(node.get("slug"))):
+                return f"{prefix}{slug}"
+        # A NetBox site carries no `parent` today. Honour one if a future version
+        # or a compatible API grows it, rather than silently dropping it.
+        parent = item.get("parent")
+        return self._site_external_id(parent) if isinstance(parent, Mapping) else None
+
+    def _site_tags(self, item: Mapping[str, Any]) -> dict[str, str]:
+        """Both hierarchy axes, as filterable tags.
+
+        Emitted whichever axis was chosen for the tree, which is the point: the
+        one that did not become the tree is still the way an operator selects
+        "every branch site" or "everything in Rohan". Bare keys rather than
+        ``tag_key_prefix`` ones, because these are structural NetBox fields
+        rather than NetBox tags -- the same reason a device's ``role`` is bare.
+        """
+        tags: dict[str, str] = {}
+        for key in ("region", "group"):
+            node = item.get(key)
+            if isinstance(node, Mapping) and (slug := _optional_str(node.get("slug"))):
+                tags[key] = slug
+        return tags
+
+    def _site_descriptive(self, item: Mapping[str, Any]) -> dict[str, Any]:
+        descriptive: dict[str, Any] = {"slug": item.get("slug")}
+        provider_url = self._provider_url(item)
+        if provider_url:
+            descriptive["provider_url"] = provider_url
+        return descriptive
 
     def _reject_duplicate_external_ids(
         self, descriptors: builtins.list[DeviceDescriptor], operation: str
