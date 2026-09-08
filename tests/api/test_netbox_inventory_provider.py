@@ -393,6 +393,8 @@ async def test_netbox_list_objects_maps_ip_prefixes(monkeypatch: pytest.MonkeyPa
         "vlan": 10,
         "role": "lan",
         "site": "ams01",
+        "scope": None,
+        "scope_type": None,
         "tenant": None,
         "is_pool": False,
         "description": "core",
@@ -400,6 +402,62 @@ async def test_netbox_list_objects_maps_ip_prefixes(monkeypatch: pytest.MonkeyPa
     # Absent nested values map to None rather than raising or being stringified.
     assert objects[1].attributes["vlan"] is None
     assert objects[1].attributes["site"] is None
+
+
+@pytest.mark.asyncio
+async def test_netbox_list_objects_maps_the_prefix_scope_on_netbox_4_2_and_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NetBox 4.2 replaced ``Prefix.site`` with a generic scope.
+
+    A prefix from a modern NetBox carries no ``site`` at all, so mapping only that
+    key left every synced prefix with a blank site and nothing to say why. The
+    scope can also be a region, a site group or a location -- which is why the type
+    is carried alongside the name rather than the name being relabelled ``site``.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": 3,
+                        "prefix": "10.90.1.0/24",
+                        "status": {"value": "active"},
+                        "vlan": {"vid": 100},
+                        "role": {"slug": "management"},
+                        "scope_type": "dcim.site",
+                        "scope_id": 4,
+                        "scope": {"name": "Prague 1", "slug": "prg1"},
+                        "tenant": {"slug": "meridian-internal"},
+                        "is_pool": False,
+                        "description": "PRG1 management",
+                    }
+                ],
+                "next": None,
+            },
+        )
+
+    provider = _provider(token="netbox-token")
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    objects = await provider.list_objects(
+        "ip_prefix",
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="list_objects:ip_prefix",
+            query_hash="",
+            config_version=1,
+        ),
+    )
+
+    attributes = objects[0].attributes
+    assert attributes["scope"] == "Prague 1"
+    assert attributes["scope_type"] == "dcim.site"
+    # The pre-4.2 key is simply absent upstream, and maps to None rather than raising.
+    assert attributes["site"] is None
+    assert attributes["tenant"] == "meridian-internal"
 
 
 @pytest.mark.asyncio

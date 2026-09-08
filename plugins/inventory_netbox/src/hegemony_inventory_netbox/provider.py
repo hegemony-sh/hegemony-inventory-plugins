@@ -114,7 +114,15 @@ _IPAM_OBJECT_SOURCES: dict[str, tuple[str, ObjectFieldMapping]] = {
                 "status": "status.value",
                 "vlan": "vlan.vid",
                 "role": "role.slug",
+                # NetBox 4.2 replaced Prefix.site with a generic scope, which can be a
+                # site, a region, a site group or a location. Both spellings are mapped:
+                # `site` still resolves on a pre-4.2 NetBox and is simply absent after,
+                # and `scope`/`scope_type` carry the newer shape -- with the type named,
+                # because a bare slug labelled "site" would be a lie when the prefix is
+                # actually scoped to a region.
                 "site": "site.slug",
+                "scope": "scope.name",
+                "scope_type": "scope_type",
                 "tenant": "tenant.slug",
                 "is_pool": "is_pool",
                 "description": "description",
