@@ -1328,6 +1328,8 @@ async def test_get_site_resolves_a_hierarchy_node(monkeypatch: pytest.MonkeyPatc
         context=ProviderCallContext(provider_id="netbox:primary", operation="get_site"),
     )
 
+    # get() returns a union; narrow it the way the other site tests here do.
+    assert isinstance(node, SiteRef)
     assert node.external_id == "region:gondor"
     assert node.name == "Gondor"
     assert node.tags == {"node_type": "region"}
