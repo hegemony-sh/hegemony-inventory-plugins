@@ -1084,3 +1084,302 @@ def test_netbox_a_native_tag_never_overwrites_the_mapped_role() -> None:
     )
 
     assert device.tags == {"role": "edge"}
+
+
+# --- the site tree -------------------------------------------------------------------
+# NetBox keeps two independent nested hierarchies above a site -- Region and Site
+# Group -- and a platform Site has one parent, so the provider has to choose. These
+# cover the choice, what happens to the axis that loses, and the mechanics that make
+# synthesized nodes safe to materialize alongside real sites.
+
+_SITES_WITH_HIERARCHY = {
+    "results": [
+        {
+            "id": 1,
+            "slug": "mt1",
+            "name": "Minas Tirith",
+            "region": {"id": 20, "slug": "gondor", "name": "Gondor"},
+            "group": {"id": 30, "slug": "datacenter", "name": "Datacenter"},
+        },
+        {
+            "id": 2,
+            "slug": "hob1",
+            "name": "Hobbiton",
+            "region": {"id": 21, "slug": "eriador", "name": "Eriador"},
+            "group": {"id": 31, "slug": "branch", "name": "Branch"},
+        },
+    ],
+    "next": None,
+}
+
+_REGIONS = {
+    "results": [
+        {"id": 10, "slug": "middle-earth", "name": "Middle-earth", "parent": None},
+        {
+            "id": 20,
+            "slug": "gondor",
+            "name": "Gondor",
+            "parent": {"id": 10, "slug": "middle-earth", "name": "Middle-earth"},
+        },
+        {
+            "id": 21,
+            "slug": "eriador",
+            "name": "Eriador",
+            "parent": {"id": 10, "slug": "middle-earth", "name": "Middle-earth"},
+        },
+        # Referenced by no synced site, so it must not be emitted.
+        {
+            "id": 22,
+            "slug": "mordor",
+            "name": "Mordor",
+            "parent": {"id": 10, "slug": "middle-earth", "name": "Middle-earth"},
+        },
+    ],
+    "next": None,
+}
+
+_SITE_GROUPS = {
+    "results": [
+        {"id": 30, "slug": "datacenter", "name": "Datacenter", "parent": None},
+        {"id": 31, "slug": "branch", "name": "Branch", "parent": None},
+    ],
+    "next": None,
+}
+
+
+def _hierarchy_transport(
+    monkeypatch: pytest.MonkeyPatch, sites: Any = _SITES_WITH_HIERARCHY
+) -> None:
+    _install_transport(
+        monkeypatch,
+        _json_transport(
+            {
+                "/api/dcim/sites/": sites,
+                "/api/dcim/regions/": _REGIONS,
+                "/api/dcim/site-groups/": _SITE_GROUPS,
+            }
+        ),
+    )
+
+
+async def _listed(provider: NetBoxInventoryProvider) -> list[Any]:
+    return await provider.list_sites(
+        context=ProviderCallContext(provider_id="netbox:primary", operation="list_sites")
+    )
+
+
+@pytest.mark.asyncio
+async def test_regions_become_the_site_tree_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NetBox site has no parent of its own; its region is the hierarchy.
+
+    Without this the platform received a flat list -- ``_map_site`` looked for a
+    ``parent`` key that NetBox never sends -- and the site tree, which the API
+    exposes and "include child sites" targeting depends on, had nothing in it.
+    """
+    provider = _provider(token="netbox-token")
+    _hierarchy_transport(monkeypatch)
+
+    listed = await _listed(provider)
+    by_id = {site.external_id: site for site in listed}
+
+    # The regions arrive as sites, nested by their own parent...
+    assert by_id["region:middle-earth"].parent_external_id is None
+    assert by_id["region:gondor"].parent_external_id == "region:middle-earth"
+    assert by_id["region:eriador"].parent_external_id == "region:middle-earth"
+    # ...and the real sites hang from them.
+    assert by_id["mt1"].parent_external_id == "region:gondor"
+    assert by_id["hob1"].parent_external_id == "region:eriador"
+
+
+@pytest.mark.asyncio
+async def test_only_the_ancestors_of_synced_sites_are_emitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scoped sync must not drag in the whole of NetBox's geography.
+
+    ``device_query`` exists so an operator can sync 300 devices out of 50,000;
+    emitting every region regardless would undo that for sites, and NetBox's
+    region tree can describe an entire estate the platform never syncs.
+    """
+    provider = _provider(token="netbox-token")
+    _hierarchy_transport(monkeypatch)
+
+    listed = await _listed(provider)
+
+    ids = {site.external_id for site in listed}
+    assert "region:mordor" not in ids, "an unreferenced region was materialized"
+    # Its parent is still there, because two synced sites do descend from it.
+    assert "region:middle-earth" in ids
+
+
+@pytest.mark.asyncio
+async def test_both_hierarchy_axes_are_tagged_whichever_one_is_the_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Choosing one axis must not lose the other.
+
+    Only one of region and site group can be the parent, but an operator still
+    wants to select "every branch site" or "everything in Gondor". Both are
+    surfaced as tags so the axis that lost stays usable for filtering.
+    """
+    provider = _provider(token="netbox-token")
+    _hierarchy_transport(monkeypatch)
+
+    listed = await _listed(provider)
+    mt1 = next(site for site in listed if site.external_id == "mt1")
+
+    assert mt1.tags == {"region": "gondor", "group": "datacenter"}
+
+
+@pytest.mark.asyncio
+async def test_site_group_can_be_the_tree_instead(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other axis, for estates modelled by function rather than geography."""
+    provider = _provider({"site_tree_source": "site_group"}, token="netbox-token")
+    _hierarchy_transport(monkeypatch)
+
+    listed = await _listed(provider)
+    by_id = {site.external_id: site for site in listed}
+
+    assert by_id["mt1"].parent_external_id == "site-group:datacenter"
+    assert by_id["hob1"].parent_external_id == "site-group:branch"
+    assert "region:gondor" not in by_id, "the unchosen axis must not also be materialized"
+    # ...and the region is still a tag.
+    assert by_id["mt1"].tags["region"] == "gondor"
+
+
+@pytest.mark.asyncio
+async def test_site_tree_source_none_keeps_the_flat_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The previous behaviour stays reachable, and costs no extra request."""
+    provider = _provider({"site_tree_source": "none"}, token="netbox-token")
+    calls: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _json_transport(
+            {
+                "/api/dcim/sites/": _SITES_WITH_HIERARCHY,
+                "/api/dcim/regions/": _REGIONS,
+            },
+            recorder=calls,
+        ),
+    )
+
+    listed = await _listed(provider)
+
+    assert [site.external_id for site in listed] == ["mt1", "hob1"]
+    assert all(site.parent_external_id is None for site in listed)
+    assert not any("/regions/" in call for call in calls), (
+        "the hierarchy endpoint was fetched even though no tree was asked for"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_region_and_a_site_sharing_a_slug_do_not_collide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NetBox slugs are unique per model, not globally.
+
+    A region and a site may both be "gondor". The platform keys sites on
+    (provider_id, external_id), so without the prefix the two would be one row --
+    a site that is its own parent, or an aggregation node with a device on it.
+    """
+    provider = _provider(token="netbox-token")
+    _hierarchy_transport(
+        monkeypatch,
+        sites={
+            "results": [
+                {
+                    "id": 1,
+                    "slug": "gondor",
+                    "name": "Gondor DC",
+                    "region": {"id": 20, "slug": "gondor", "name": "Gondor"},
+                }
+            ],
+            "next": None,
+        },
+    )
+
+    listed = await _listed(provider)
+    ids = [site.external_id for site in listed]
+
+    assert len(ids) == len(set(ids)), f"duplicate external ids: {ids}"
+    assert {"gondor", "region:gondor"} <= set(ids)
+    site = next(one for one in listed if one.external_id == "gondor")
+    assert site.parent_external_id == "region:gondor"
+    assert site.parent_external_id != site.external_id
+
+
+@pytest.mark.asyncio
+async def test_get_site_resolves_a_hierarchy_node(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opening a region row must work, not 404.
+
+    The nodes are sites as far as the platform is concerned, so every read path
+    has to know the prefix -- not only the one that created them.
+    """
+    provider = _provider(token="netbox-token")
+    _hierarchy_transport(monkeypatch)
+
+    node = await provider.get(
+        ResourceType.SITE,
+        "region:gondor",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="get_site"),
+    )
+
+    assert node.external_id == "region:gondor"
+    assert node.name == "Gondor"
+    assert node.tags == {"node_type": "region"}
+
+
+@pytest.mark.asyncio
+async def test_a_cyclic_hierarchy_does_not_hang_the_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The walk climbs data from a remote system, so it stops at the first repeat.
+
+    NetBox's own tree cannot contain a cycle, but a sync that hangs is far worse
+    than one that fails: it holds the provider's claim and blocks every later
+    tick, where a failure is retried.
+    """
+    provider = _provider(token="netbox-token")
+    _install_transport(
+        monkeypatch,
+        _json_transport(
+            {
+                "/api/dcim/sites/": {
+                    "results": [
+                        {
+                            "id": 1,
+                            "slug": "mt1",
+                            "name": "Minas Tirith",
+                            "region": {"id": 20, "slug": "a", "name": "A"},
+                        }
+                    ],
+                    "next": None,
+                },
+                "/api/dcim/regions/": {
+                    "results": [
+                        {
+                            "id": 20,
+                            "slug": "a",
+                            "name": "A",
+                            "parent": {"id": 21, "slug": "b", "name": "B"},
+                        },
+                        {
+                            "id": 21,
+                            "slug": "b",
+                            "name": "B",
+                            "parent": {"id": 20, "slug": "a", "name": "A"},
+                        },
+                    ],
+                    "next": None,
+                },
+            }
+        ),
+    )
+
+    listed = await _listed(provider)
+
+    assert {"region:a", "region:b"} <= {site.external_id for site in listed}

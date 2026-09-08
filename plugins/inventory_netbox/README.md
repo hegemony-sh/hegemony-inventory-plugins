@@ -35,6 +35,7 @@ rendered automatically and `token_ref` gets a secret picker.
 | `auth_fallback_schemes` | no | `["Token"]` | Schemes retried on auth failure |
 | `verify_tls` | no | `true` | Verify the TLS certificate |
 | `device_query` | no | `""` | NetBox device filter applied to **every** device read, e.g. `status=active&role=wan-edge` |
+| `site_tree_source` | no | `region` | Which NetBox hierarchy becomes the site tree: `region`, `site_group` or `none`. The other axis is still tagged |
 | `tag_key_prefix` | no | `tag:` | Prefix for NetBox tag slugs surfaced as filterable device tags. Set to `""` for bare keys |
 | `status_map` | no | built-in | Maps a NetBox device status slug to a maintenance state (`active`, `maintenance`, `disabled`) |
 | `field_map` | no | built-in | Maps normalized inventory fields → NetBox REST payload paths, including optional `access_config.*` refs under `custom_fields` |
@@ -145,6 +146,45 @@ key, so the NetBox site hierarchy survives the round trip.
 
 NetBox tags are flat slugs, but devices are filtered on a `key=value` map
 (`tags[role]=core` in device search, `tag.*` in run forms). Each NetBox tag is surfaced
+## The site tree
+
+NetBox keeps **two** independent nested hierarchies above a site — **Region**
+(geography) and **Site Group** (function) — and a site carries a nullable
+foreign key to each. A Hegemony site has a single parent, so the two cannot both
+be projected onto it: combining them would mean inventing combined nodes that
+exist in neither system.
+
+`site_tree_source` picks which one becomes the tree:
+
+| Value | Effect |
+|---|---|
+| `region` (default) | Regions are materialized as sites, nested by their own parent; each site hangs from its region |
+| `site_group` | The same, using site groups |
+| `none` | No tree. Sites arrive flat, and the hierarchy endpoint is never fetched |
+
+**The axis that loses is not lost.** Both are always surfaced as site tags,
+`region` and `group`, so an operator can still select "every branch site" or
+"everything in Gondor" whichever way the tree is drawn. They are bare keys rather
+than `tag_key_prefix` ones, because they are structural NetBox fields rather than
+NetBox tags — the same reason a device's `role` is bare.
+
+Two details worth knowing:
+
+- **Synthesized nodes carry a prefix** — `region:gondor`, `site-group:branch`.
+  NetBox slugs are unique per model, not globally, so a region and a site may both
+  be `gondor`; Hegemony keys sites on `(provider_id, external_id)`, and without the
+  prefix those two would collide into one row. Nodes are also tagged
+  `node_type=region` (or `site_group`), so a selector can tell an aggregation node
+  from a place with equipment in it.
+- **Only the ancestors of the sites you sync are emitted.** A NetBox region tree
+  can describe an entire estate; a provider scoped with `device_query` has no
+  business dragging all of it in.
+
+NetBox **Locations** — the rooms and rack rows *inside* a site — are deliberately
+not part of the tree. They arrive as a device attribute (`location`) instead,
+because making them sites would move every device that has one a level down and
+silently break any selector pinned to a site.
+
 as `<tag_key_prefix><slug> = "true"` — the tag `core` becomes `tags["tag:core"]`. The
 prefix keeps a NetBox tag named `role` from colliding with the mapped device role. The
 raw slugs remain available unprefixed as `native_tags`.

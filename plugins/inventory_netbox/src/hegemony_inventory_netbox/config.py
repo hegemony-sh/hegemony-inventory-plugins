@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
@@ -85,6 +85,19 @@ class NetBoxProviderConfig(BaseModel):
             "NetBox device filter applied to every device read, e.g. "
             "'status=active&role=wan-edge'. Auto-sync otherwise pulls the entire "
             "device table. A caller-supplied query is appended to this one."
+        ),
+    )
+    site_tree_source: Literal["region", "site_group", "none"] = Field(
+        "region",
+        description=(
+            "Which NetBox hierarchy becomes the platform's site tree. NetBox keeps "
+            "TWO independent nested hierarchies above a site -- Region (geography) "
+            "and Site Group (function) -- while a platform site has a single parent, "
+            "so one of them has to be chosen. Regardless of the choice, BOTH are "
+            "always surfaced as site tags ('region' and 'group'), so picking one "
+            "never loses the other: the unchosen axis stays available for filtering. "
+            "'none' reproduces the flat list this provider produced before the tree "
+            "was mapped at all."
         ),
     )
     tag_key_prefix: str = Field(
