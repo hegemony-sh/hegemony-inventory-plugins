@@ -256,6 +256,11 @@ applied to every read of it:
 A caller-supplied query is appended, and NetBox ANDs the two. Keys are object type ids; a
 key naming no family is rejected.
 
+The filter bounds what the provider can see of that family, not just what it lists, so
+reading one object obeys it too: a scoped family resolves an id through the filtered list
+endpoint, and an object outside the scope reads as absent rather than being returned to a
+caller that happens to know its id.
+
 ### The catalogue
 
 50 families, grouped by NetBox app. Ids are stable: they are stored on every row and

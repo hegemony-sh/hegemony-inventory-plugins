@@ -433,14 +433,22 @@ class NetBoxInventoryProvider(InventoryProvider):
             )
         ]
 
+    def _object_scope(self, source: NetBoxObjectType) -> str:
+        """The filter this provider always applies to a family, built in and configured.
+
+        This is the whole of what a provider is allowed to see of a family, so every read
+        of it -- a list or a single object -- has to go through this.
+        """
+        configured = self.config.object_queries.get(source.id, "")
+        return "&".join(part for part in (source.base_query, configured) if part)
+
     def _object_path(self, source: NetBoxObjectType, expr: str) -> str:
         """The endpoint for one family, scoped by its configured and caller filters.
 
         Same shape as ``device_query``: the configured baseline narrows every read of
         the family, a caller expression is appended, and NetBox ANDs the two.
         """
-        configured = self.config.object_queries.get(source.id, "")
-        parts = [part for part in (source.base_query, configured, expr.lstrip("?")) if part]
+        parts = [part for part in (self._object_scope(source), expr.lstrip("?")) if part]
         return f"{source.endpoint}?{'&'.join(parts)}" if parts else source.endpoint
 
     async def get_object(
@@ -459,17 +467,51 @@ class NetBoxInventoryProvider(InventoryProvider):
         source = self._object_sources.get(object_type)
         if source is None:
             return await super().get_object(object_type, external_id, context=context)
-        identifier = quote(str(external_id).strip(), safe="")
+        identifier = str(external_id).strip()
         if not identifier:
             raise self._error(
                 ProviderErrorCode.NOT_FOUND,
                 "NetBox object id is empty",
                 context.operation,
             )
-        payload = await self._request_json(f"{source.endpoint}{identifier}/", context)
+        payload = await self._object_payload(source, identifier, context)
         return self._with_provider_url(
             map_record(payload, source.mapping, provider_id=self.id), payload
         )
+
+    async def _object_payload(
+        self, source: NetBoxObjectType, identifier: str, context: ProviderCallContext
+    ) -> dict[str, Any]:
+        """One object's raw payload, honouring the filter that scopes its family.
+
+        NetBox's detail endpoint takes no filters, so reading it directly would hand back
+        an object from outside the configured ``object_queries`` scope to any caller that
+        knows its id -- a provider narrowed to one site answering for another. Where a
+        scope is configured the id is resolved through the filtered list endpoint instead
+        (``id`` is a filter every NetBox family supports), which leaves an object outside
+        the scope indistinguishable from one that does not exist. Unscoped families keep
+        the cheaper direct read.
+        """
+        if not self._object_scope(source):
+            return await self._request_json(
+                f"{source.endpoint}{quote(identifier, safe='')}/", context
+            )
+        matches = await self._paginated(
+            self._object_path(source, _query_to_expr({"id": identifier})),
+            context,
+            page_limit=self._services.limits.max_provider_pages,
+            # `id` is NetBox's primary key, so at most one row can match; asking for two
+            # would make the pager chase a second page that cannot hold a match.
+            result_limit=1,
+        )
+        if not matches:
+            raise self._error(
+                ProviderErrorCode.NOT_FOUND,
+                f"NetBox {source.display_name} {identifier} was not found within this "
+                "provider's configured object query",
+                context.operation,
+            )
+        return matches[0]
 
     async def test_connection(self, *, context: ProviderCallContext) -> ProviderTestResult:
         start = monotonic()

@@ -31,8 +31,10 @@ from hegemony_inventory_sdk import (
     InventoryProviderError,
     ObjectTypeSpec,
     ProviderCallContext,
+    ProviderErrorCode,
     ProviderFactory,
     ResourceType,
+    map_record,
 )
 from tests.inventory_fakes import FakePlatformServices
 
@@ -341,6 +343,140 @@ async def test_get_object_reads_one_object_of_a_catalogue_family(
     assert paths == ["/api/dcim/interfaces/41/"]
     assert interface.external_id == "41"
     assert interface.attributes["device"] == "ams01-core-01"
+
+
+@pytest.mark.asyncio
+async def test_get_object_cannot_escape_the_family_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scoped family answers for the objects inside its scope and no others.
+
+    NetBox's detail route takes no filters, so reading it directly would let any caller
+    that knows an id pull an object a provider was deliberately narrowed away from. The
+    id is resolved through the filtered list endpoint instead, which makes an object
+    outside the scope indistinguishable from one that does not exist.
+    """
+    urls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        # NetBox answers a filtered list; interface 41 is on device 7, interface 99 is not.
+        in_scope = request.url.params.get("id") == "41"
+        return httpx.Response(
+            200, json={"results": [_INTERFACE_PAYLOAD] if in_scope else [], "next": None}
+        )
+
+    _install_transport(monkeypatch, handler)
+    provider = _provider(
+        {"object_types": ["interface"], "object_queries": {"interface": "device_id=7"}}
+    )
+
+    interface = await provider.get_object("interface", "41", context=_context("get_object"))
+    assert interface.external_id == "41"
+
+    with pytest.raises(InventoryProviderError) as excinfo:
+        await provider.get_object("interface", "99", context=_context("get_object"))
+    assert excinfo.value.envelope.code == ProviderErrorCode.NOT_FOUND.value
+
+    # Both reads went to the filtered list endpoint, never to /interfaces/<id>/.
+    assert urls == [
+        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=41",
+        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=99",
+    ]
+
+
+# NetBox 4.2 replaced Cluster.site and CircuitTermination.site/provider_network with
+# generic scopes, and 4.3 did the same to Service.device/virtual_machine. A path that is
+# absent maps to None, so mapping only the old spelling silently yields nothing at all on
+# a current NetBox -- which is why both are mapped and why this pins each shape.
+_GENERIC_RELATION_CASES = [
+    pytest.param(
+        "cluster",
+        {
+            "id": 3,
+            "display": "ams-cluster",
+            "name": "ams-cluster",
+            "scope_type": "dcim.site",
+            "scope": {"id": 5, "name": "AMS 01", "slug": "ams01"},
+        },
+        {"scope": "AMS 01", "scope_type": "dcim.site", "site": None},
+        id="cluster-scope",
+    ),
+    pytest.param(
+        "circuit_termination",
+        {
+            "id": 8,
+            "display": "Termination A",
+            "term_side": "A",
+            "circuit": {"id": 2, "cid": "ntt-1"},
+            "termination_type": "circuits.providernetwork",
+            "termination": {"id": 9, "name": "NTT Global"},
+        },
+        {
+            "termination": "NTT Global",
+            "termination_type": "circuits.providernetwork",
+            "site": None,
+            "provider_network": None,
+        },
+        id="circuit-termination",
+    ),
+    pytest.param(
+        "service",
+        {
+            "id": 11,
+            "display": "ssh",
+            "name": "ssh",
+            "ports": [22],
+            "parent_object_type": "ipam.fhrpgroup",
+            "parent": {"id": 4, "display": "VRRP2 group 10"},
+        },
+        # An FHRP group has no name, which is why `display` is read.
+        {
+            "parent": "VRRP2 group 10",
+            "parent_object_type": "ipam.fhrpgroup",
+            "device": None,
+            "virtual_machine": None,
+        },
+        id="service-parent",
+    ),
+]
+
+
+@pytest.mark.parametrize(("object_type", "payload", "expected"), _GENERIC_RELATION_CASES)
+def test_the_generic_scopes_netbox_moved_to_are_mapped(
+    object_type: str, payload: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    descriptor = map_record(
+        payload, catalogue.BY_ID[object_type].mapping, provider_id="netbox:primary"
+    )
+    for name, value in expected.items():
+        assert descriptor.attributes[name] == value, name
+    # A polymorphic target cannot be an edge: one relationship names one target type,
+    # and these point at whichever type the row happens to carry.
+    assert all(
+        relationship.rel not in {"scope", "termination", "parent"}
+        for relationship in descriptor.relationships
+    )
+
+
+def test_the_legacy_spelling_still_resolves_on_an_older_netbox() -> None:
+    """The pre-4.2 payload keeps working, edge included; that is why both are mapped."""
+    descriptor = map_record(
+        {
+            "id": 3,
+            "display": "ams-cluster",
+            "name": "ams-cluster",
+            "site": {"id": 5, "name": "AMS 01", "slug": "ams01"},
+        },
+        catalogue.BY_ID["cluster"].mapping,
+        provider_id="netbox:primary",
+    )
+    assert descriptor.attributes["site"] == "ams01"
+    assert descriptor.attributes["scope"] is None
+    assert [
+        (relationship.rel, relationship.target_external_id)
+        for relationship in descriptor.relationships
+    ] == [("site", "ams01")]
 
 
 def test_the_config_rejects_families_nothing_serves_and_keeps_the_wildcard() -> None:

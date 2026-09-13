@@ -931,16 +931,23 @@ _IPAM: tuple[NetBoxObjectType, ...] = (
         plural="Services",
         description="Services a device or virtual machine exposes, with their ports.",
         name_field="name",
-        identity_keys=("device", "name"),
+        identity_keys=("parent", "name"),
         icon="globe",
-        columns=("name", "protocol", "ports", "device"),
+        columns=("name", "protocol", "ports", "parent"),
         search_fields=("name", "description"),
         attributes={
             "name": _text("name", nullable=False),
             "protocol": _text("protocol.value"),
             "ports": _list("ports"),
+            # NetBox 4.3 replaced Service.device and Service.virtual_machine with one
+            # generic `parent`, so a service can also hang off an FHRP group. The API key
+            # for the type is `parent_object_type`, not `parent_type`. `parent.display` is
+            # read rather than `parent.name` because an FHRP group has no name. Both
+            # spellings are mapped; the two legacy edges below resolve only pre-4.3.
             "device": _text("device.name"),
             "virtual_machine": _text("virtual_machine.name"),
+            "parent": _text("parent.display"),
+            "parent_object_type": _text("parent_object_type"),
             "description": _text("description"),
         },
         relationships=(
@@ -1030,14 +1037,23 @@ _VIRTUALIZATION: tuple[NetBoxObjectType, ...] = (
         name_field="name",
         identity_keys=("name",),
         icon="layers",
-        columns=("name", "type", "status", "site"),
+        columns=("name", "type", "status", "scope"),
         search_fields=("name", "description"),
         attributes={
             "name": _text("name", nullable=False),
             "type": _text("type.name"),
             "group": _text("group.name"),
             "status": _text("status.value"),
+            # NetBox 4.2 replaced Cluster.site with a generic scope -- a region, a site
+            # group, a site or a location -- exactly as it did for Prefix. Both spellings
+            # are mapped, and the type is named alongside the value because a bare slug
+            # labelled "site" would be a lie for a cluster scoped to a region. The legacy
+            # site edge below still resolves pre-4.2 and is simply omitted after; the
+            # generic target stays an attribute, since one edge cannot name a target type
+            # that varies per row.
             "site": _text("site.slug"),
+            "scope": _text("scope.name"),
+            "scope_type": _text("scope_type"),
             "tenant": _text("tenant.slug"),
             "description": _text("description"),
         },
@@ -1166,13 +1182,19 @@ _CIRCUITS: tuple[NetBoxObjectType, ...] = (
         description="Where a circuit lands: which side, which site, at what speed.",
         identity_keys=("circuit", "term_side"),
         icon="cable",
-        columns=("name", "circuit", "term_side", "site", "port_speed"),
+        columns=("name", "circuit", "term_side", "termination", "port_speed"),
         search_fields=("description", "xconnect_id"),
         attributes={
             "circuit": _text("circuit.cid"),
             "term_side": _text("term_side"),
+            # NetBox 4.2 replaced the site and provider_network foreign keys with one
+            # generic `termination`, which may be a region, site group, site, location or
+            # provider network. All three spellings are mapped so one catalogue serves
+            # either release; the legacy site edge below resolves only pre-4.2.
             "site": _text("site.slug"),
             "provider_network": _text("provider_network.name"),
+            "termination": _text("termination.name"),
+            "termination_type": _text("termination_type"),
             "port_speed": _int("port_speed"),
             "upstream_speed": _int("upstream_speed"),
             "xconnect_id": _text("xconnect_id"),
@@ -1205,6 +1227,10 @@ _WIRELESS: tuple[NetBoxObjectType, ...] = (
             "vlan": _int("vlan.vid"),
             "auth_type": _text("auth_type.value"),
             "auth_cipher": _text("auth_cipher.value"),
+            # 4.2 added the generic scope here too; nothing was removed, so this is the
+            # only spelling.
+            "scope": _text("scope.name"),
+            "scope_type": _text("scope_type"),
             "tenant": _text("tenant.slug"),
             "description": _text("description"),
         },
