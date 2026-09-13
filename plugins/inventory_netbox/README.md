@@ -298,6 +298,22 @@ Polymorphic references are stored as data rather than as edges: an IP address ke
 `assigned_object_type` and `assigned_object_id` as attributes, because one edge cannot
 name a target type that varies per row.
 
+### NetBox versions
+
+Reads work across releases. Where NetBox replaced a specific foreign key with a generic
+one, both spellings are mapped and whichever the server does not serve is simply null: a
+prefix's and cluster's `site` alongside `scope`, a circuit termination's `site` and
+`provider_network` alongside `termination`, a service's `device` and `virtual_machine`
+alongside `parent` (4.2 and 4.3), and a contact's `group` alongside `groups`. The legacy
+edge is emitted only when its field is present, so an older NetBox keeps the edge and a
+current one carries the generic value as an attribute.
+
+The **default browse columns** assume the generic shape, since that is what a supported
+NetBox serves. On a pre-4.2 or pre-4.3 server the generic column reads empty while the
+legacy value is still stored, still searchable, and still shown on the object's own page,
+which lists every attribute. Listing both spellings as columns would instead leave every
+operator one permanently empty column, whichever release they run.
+
 ## Adding an object type
 
 One entry in `OBJECT_TYPES` in `src/hegemony_inventory_netbox/object_types.py`, and
