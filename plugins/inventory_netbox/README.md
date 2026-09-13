@@ -40,6 +40,8 @@ rendered automatically and `token_ref` gets a secret picker.
 | `status_map` | no | built-in | Maps a NetBox device status slug to a maintenance state (`active`, `maintenance`, `disabled`) |
 | `field_map` | no | built-in | Maps normalized inventory fields → NetBox REST payload paths, including optional `access_config.*` refs under `custom_fields` |
 | `default_access_config` | no | `{}` | Access-config defaults applied to every device |
+| `object_types` | no | `null` | Which NetBox families to read beyond devices and sites. `null` = prefixes, IP addresses and VLANs; `["*"]` = all of them; or list ids. See [Object types](#object-types) |
+| `object_queries` | no | `{}` | Per-family NetBox filter, e.g. `{"interface": "mgmt_only=false"}` — `device_query` for everything that is not a device |
 | `query_cache_ttl_seconds` | no | `null` | Optional query cache TTL (0–86400 s) |
 | `timeout_seconds` | no | `10` | Per-request timeout |
 
@@ -104,7 +106,7 @@ An unmapped status yields no value rather than forcing the device back to `activ
 locally-set state is not overwritten by a sync. Override the table per provider with
 `status_map`; only `active`, `maintenance` and `disabled` are accepted as targets.
 
-### Scoping what syncs
+### Scoping which devices sync
 
 Auto-sync calls `query_devices` with an empty expression, so by default a provider
 imports the **entire** NetBox device table. `device_query` sets a baseline filter applied
@@ -115,7 +117,8 @@ to every device read:
 ```
 
 A caller-supplied query (a run-form preview, for instance) is appended to it, and NetBox
-ANDs the two.
+ANDs the two. Everything that is not a device is scoped the same way, per family, with
+[`object_queries`](#scoping-each-family).
 
 ### Extra device fields
 
@@ -127,7 +130,8 @@ Each is omitted entirely when the device does not carry it.
 
 ### Linking back to NetBox
 
-Every device, site and IPAM object carries `descriptive.provider_url`, the NetBox UI page
+Every device, site and object of any read family carries `descriptive.provider_url`, the
+NetBox UI page
 for that object, so Hegemony can offer an "Open in NetBox" link. It is read from NetBox's
 own `display_url`, falling back to the API `url` with its `/api` prefix dropped, and is
 pinned to the configured provider origin — a NetBox echoing another host cannot turn the
@@ -196,52 +200,129 @@ The same generic `field_map` also controls optional access-config refs. For exam
 payload. Provider-level `default_access_config` is merged first, and mapped device-specific
 values override those defaults when present.
 
-## Supported object types
+## Object types
 
-- `device`, `site` — core device/site inventory.
-- `ip_prefix`, `ip_address`, `vlan` — NetBox IPAM prefixes/addresses and VLANs. They appear
-  under the **Inventory** menu with schema-driven list/detail pages and sync alongside
-  devices/sites whenever the provider syncs.
+NetBox models far more than devices and sites, and this provider can read all of it. What
+it reads for a given provider is that provider's choice, because reading everything is
+rarely what anyone wants: an interface table is two orders of magnitude larger than a
+device table, and a rack elevation is not worth a sync.
 
-List and detail reads both go through the endpoint/mapping table, and a query mapping is
-pushed to NetBox as a querystring rather than filtered client-side.
+- `device`, `site` — always read. Devices and sites are the platform's own tables, with
+  their own columns, targeting and site tree.
+- Everything else is a **family** in the catalogue
+  (`src/hegemony_inventory_netbox/object_types.py`), materialized into the generic
+  inventory-object store with schema-driven list and detail pages, free-text search and
+  filters, and no frontend code.
+
+Read by default: `ip_prefix`, `ip_address` and `vlan` — the three families this plugin
+served before the catalogue existed, so upgrading never multiplies what a sync pulls.
+
+### Choosing what to read
+
+`object_types` names the families this provider reads:
+
+```json
+{ "object_types": ["interface", "vlan", "virtual_machine", "circuit"] }
+```
+
+- Omit it, or leave it `null`, for the default three.
+- `["*"]` reads every family in the catalogue, **including** ones a later plugin version
+  adds. The wildcard is stored as written rather than expanded, which is what makes that
+  true.
+- `[]` reads devices and sites only.
+- A comma-separated string works too (`"rack, cable"`), and an id nothing serves is
+  rejected by name, with the valid ids listed.
+
+A family this provider does not read is not requested at all, and rows an earlier sync
+stored for it are marked **stale** on the next sync rather than left looking current. The
+platform's own per-provider *Object types to sync* selection narrows this further: a
+family has to be read here **and** selected there.
+
+### Scoping each family
+
+`object_queries` is to a family what `device_query` is to devices — a NetBox filter
+applied to every read of it:
+
+```json
+{
+  "object_types": ["interface", "ip_address"],
+  "object_queries": {
+    "interface": "mgmt_only=false&enabled=true",
+    "ip_address": "status=active"
+  }
+}
+```
+
+A caller-supplied query is appended, and NetBox ANDs the two. Keys are object type ids; a
+key naming no family is rejected.
+
+### The catalogue
+
+50 families, grouped by NetBox app. Ids are stable: they are stored on every row and
+referenced by authored flow forms.
+
+| NetBox app | Families |
+| --- | --- |
+| `tenancy` | `tenant`, `tenant_group`, `contact` |
+| `dcim` | `location`, `rack`, `manufacturer`, `device_type`, `device_role`, `platform`, `interface`, `console_port`, `power_port`, `power_outlet`, `front_port`, `rear_port`, `module`, `module_type`, `inventory_item`, `cable`, `power_panel`, `power_feed`, `virtual_chassis`, `virtual_device_context` |
+| `ipam` | `ip_prefix`, `ip_address`, `vlan`, `ip_range`, `aggregate`, `rir`, `ipam_role`, `vlan_group`, `vrf`, `route_target`, `service`, `asn`, `fhrp_group` |
+| `virtualization` | `virtual_machine`, `cluster`, `vm_interface` |
+| `circuits` | `circuit`, `circuit_type`, `circuit_provider`, `provider_network`, `circuit_termination` |
+| `wireless` | `wireless_lan`, `wireless_link` |
+| `vpn` | `vpn_tunnel`, `l2vpn` |
+| `extras` | `config_context`, `journal_entry` |
+
+`circuit_provider` is NetBox's *Provider* model — a carrier. It is not called `provider`
+because an inventory provider is something else entirely here.
+
+Deliberately absent: **regions and site groups**, which this provider already projects
+onto the platform's site tree and would otherwise exist twice; **device and module bays**
+and **cable terminations**, which are structural placeholders rather than things anyone
+targets; and NetBox's own plumbing — webhooks, scripts, jobs, object changes — which is
+not inventory.
+
+### Relationships
+
+Families declare their edges, so a row points at what it belongs to: an interface at its
+device and its LAG, a prefix at its VLAN and VRF, a circuit at its carrier, a VM at its
+cluster. Edges cite the same external id the target row is keyed on — NetBox's numeric id
+for objects and devices, the site slug for sites — so they line up with what a device or
+site sync already stored.
+
+Polymorphic references are stored as data rather than as edges: an IP address keeps
+`assigned_object_type` and `assigned_object_id` as attributes, because one edge cannot
+name a target type that varies per row.
 
 ## Adding an object type
 
-The IPAM/VLAN types are wired through two small tables, so adding another NetBox object type
-(for example VRFs) is two edits plus a wheel release — no `list_objects` changes:
+One entry in `OBJECT_TYPES` in `src/hegemony_inventory_netbox/object_types.py`, and
+nothing else:
 
-1. Add an endpoint → mapping entry to `_IPAM_OBJECT_SOURCES` in
-   `src/hegemony_inventory_netbox/provider.py`:
+```python
+NetBoxObjectType(
+    id="ike_policy",
+    app="vpn",
+    endpoint="/api/vpn/ike-policies/",
+    display_name="IKE Policy",
+    plural="IKE Policies",
+    description="IKE policies referenced by IPsec profiles.",
+    name_field="name",
+    columns=("name", "version", "mode"),
+    search_fields=("name", "description"),
+    attributes={
+        "name": _text("name", nullable=False),
+        "version": _int("version"),
+        "mode": _text("mode.value"),
+        "description": _text("description"),
+    },
+)
+```
 
-   ```python
-   "vrf": (
-       "/api/ipam/vrfs/",
-       ObjectFieldMapping(
-           object_type="vrf",
-           identity="id",
-           name_field="name",
-           field_map={"name": "name", "rd": "rd", "description": "description"},
-       ),
-   ),
-   ```
+The entry yields both halves of the wiring: the provider reads it through
+`map_records`, and `register()` turns it into the `ObjectTypeSpec` the platform lists,
+searches and renders it with. Field paths are dotted and a missing path is null rather
+than an error, which is how one catalogue serves several NetBox releases.
 
-2. Add a matching `ObjectTypeSpec` to `_OBJECT_TYPES` in
-   `src/hegemony_inventory_netbox/__init__.py`, and add its id to `supported_resources`:
-
-   ```python
-   ObjectTypeSpec(
-       id="vrf",
-       display_name="VRF",
-       plural="VRFs",
-       field_schema={
-           "type": "object",
-           "properties": {"name": {"type": "string"}, "rd": {"type": ["string", "null"]}},
-       },
-       ui=ObjectTypeUIHints(columns=("name", "rd", "description")),
-   ),
-   ```
-
-The provider's `list_objects` already dispatches any registered source through `map_records`,
-so nothing else changes. After installing the new wheel version and restarting, the type
-appears in the inventory submenu — no core change and no database migration.
+After installing the new wheel version and restarting, the family appears in the
+inventory submenu and in the provider form's type selection — no core change and no
+database migration. It is not read until a provider's `object_types` names it.

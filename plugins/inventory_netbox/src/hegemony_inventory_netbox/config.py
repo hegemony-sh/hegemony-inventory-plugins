@@ -12,6 +12,14 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 from hegemony_inventory_sdk import MaintenanceState
 
+from .object_types import (
+    ALL_OBJECT_TYPE_IDS,
+    BY_ID,
+    DEFAULT_OBJECT_TYPE_IDS,
+    WILDCARD,
+    resolve_object_type_ids,
+)
+
 # NetBox device statuses -> the platform's MaintenanceState. "Gone or going" is
 # disabled; "not yet in service" is maintenance. Anything unlisted (including
 # "active") leaves the device active. Override per provider with ``status_map``.
@@ -119,6 +127,28 @@ class NetBoxProviderConfig(BaseModel):
     )
     field_map: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_FIELD_MAP))
     default_access_config: dict[str, Any] = Field(default_factory=dict)
+    object_types: list[str] | None = Field(
+        None,
+        description=(
+            "Which NetBox object families this provider reads, beyond devices and sites "
+            "(which are always read). Omit or leave null for "
+            f"{', '.join(DEFAULT_OBJECT_TYPE_IDS)}; use ['{WILDCARD}'] for every family "
+            "the plugin knows, including ones a later version adds; or list ids "
+            "explicitly, e.g. ['interface', 'vlan', 'virtual_machine']. NetBox's "
+            "interface, IP address and cable tables are far larger than its device "
+            "table, so read them deliberately. Valid ids: "
+            f"{', '.join(ALL_OBJECT_TYPE_IDS)}."
+        ),
+    )
+    object_queries: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-family NetBox filter applied to every read of that family, the way "
+            "device_query scopes devices, e.g. {'interface': 'mgmt_only=false', "
+            "'ip_prefix': 'status=active'}. Keys are object type ids; a caller-supplied "
+            "query is appended to the configured one."
+        ),
+    )
     query_cache_ttl_seconds: int | None = Field(None, ge=0, le=86400)
     timeout_seconds: float = Field(10.0, gt=0, le=120)
 
@@ -167,6 +197,55 @@ class NetBoxProviderConfig(BaseModel):
             return ""
         return str(value).strip()
 
+    @field_validator("object_types", mode="before")
+    @classmethod
+    def normalize_object_types(cls, value: Any) -> list[str] | None:
+        """Accept a list or a comma-separated string; reject ids nothing serves.
+
+        The selection is stored as written rather than expanded, so a provider
+        configured with the wildcard keeps reading everything the plugin knows after an
+        upgrade adds a family.
+        """
+        if value is None:
+            return None
+        if isinstance(value, str):
+            candidates = [item.strip() for item in value.split(",")]
+        elif isinstance(value, (list, tuple, set)):
+            candidates = [str(item).strip() for item in value]
+        else:
+            raise ValueError("object_types must be a list or comma-separated string")
+        wanted = {item for item in candidates if item}
+        if WILDCARD in wanted:
+            return [WILDCARD]
+        # Raises ValueError naming the unknown ids and listing the valid ones.
+        resolve_object_type_ids(wanted)
+        return sorted(wanted)
+
+    @field_validator("object_queries")
+    @classmethod
+    def validate_object_queries(cls, value: dict[str, str]) -> dict[str, str]:
+        """Normalize per-family queries and reject keys naming no known family."""
+        normalized: dict[str, str] = {}
+        unknown: list[str] = []
+        for object_type, query in value.items():
+            if not isinstance(object_type, str):
+                continue
+            key = object_type.strip()
+            if not key:
+                continue
+            if key not in BY_ID:
+                unknown.append(key)
+                continue
+            expression = str(query).strip().lstrip("?").strip() if query is not None else ""
+            if expression:
+                normalized[key] = expression
+        if unknown:
+            raise ValueError(
+                f"object_queries has unknown NetBox object type(s): {', '.join(sorted(unknown))}. "
+                f"Valid ids are: {', '.join(ALL_OBJECT_TYPE_IDS)}"
+            )
+        return normalized
+
     @field_validator("status_map")
     @classmethod
     def validate_status_map(cls, value: dict[str, str]) -> dict[str, str]:
@@ -200,6 +279,11 @@ class NetBoxProviderConfig(BaseModel):
             if stripped_key and stripped_path:
                 normalized[stripped_key] = stripped_path
         return normalized
+
+    @property
+    def enabled_object_types(self) -> tuple[str, ...]:
+        """The object families this provider reads, resolved from the selection."""
+        return resolve_object_type_ids(self.object_types)
 
     def safe_config(self) -> dict[str, Any]:
         return self.model_dump(mode="json")

@@ -42,6 +42,14 @@ def _provider(
     )
 
 
+def _object_types(provider: NetBoxInventoryProvider) -> set[str]:
+    """``supported_resources`` as object-type strings, enum members or not."""
+    return {
+        resource.value if isinstance(resource, ResourceType) else str(resource)
+        for resource in provider.supported_resources
+    }
+
+
 def _install_transport(
     monkeypatch: pytest.MonkeyPatch,
     handler: httpx.MockTransport,
@@ -331,8 +339,8 @@ def test_netbox_mapping_uses_generic_field_map_and_default_access_config() -> No
 
 
 def test_netbox_supports_ipam_object_types() -> None:
-    supported = {resource.value for resource in _provider().supported_resources}
-    assert {"device", "site", "ip_prefix", "ip_address", "vlan"} <= supported
+    """A provider reads devices, sites and the default families unless told otherwise."""
+    assert _object_types(_provider()) == {"device", "site", "ip_prefix", "ip_address", "vlan"}
 
 
 @pytest.mark.asyncio
@@ -395,6 +403,7 @@ async def test_netbox_list_objects_maps_ip_prefixes(monkeypatch: pytest.MonkeyPa
         "site": "ams01",
         "scope": None,
         "scope_type": None,
+        "vrf": None,
         "tenant": None,
         "is_pool": False,
         "description": "core",
