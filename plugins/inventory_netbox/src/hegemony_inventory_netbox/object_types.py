@@ -13,11 +13,12 @@ one entry in :data:`OBJECT_TYPES` and nothing else.
 
 Reading everything NetBox holds is rarely what an operator wants: an interface table is
 two orders of magnitude larger than a device table, and a rack elevation is not worth
-syncing to drive a change. So the catalogue is the *space* of what can be read, and the
-provider config's ``object_types`` decides what a given provider actually reads. Only
-the three IPAM families this plugin served before are read by default
-(:data:`DEFAULT_OBJECT_TYPE_IDS`), so upgrading the plugin never silently multiplies
-what a sync pulls.
+syncing to drive a change. That choice belongs to the platform, which asks for it on the
+provider's own form and then asks this provider only for the families it wants: the
+catalogue is the *space* of what can be read, and every family in it is offered. The
+config's ``object_types`` can narrow that space further -- a provider that must never
+read NetBox's interface table whatever an operator ticks -- but it is not where the
+everyday choice is made, and leaving it unset offers everything.
 
 Field paths are dotted (``status.value`` reads NetBox's rendered choice object). A path
 that a NetBox version does not serve yields ``None`` rather than an error, which is how
@@ -113,8 +114,6 @@ class NetBoxObjectType:
     search_fields: tuple[str, ...] = ("name",)
     icon: str | None = None
     relationships: tuple[RelationshipMapping, ...] = ()
-    #: Read unless the provider config says otherwise.
-    read_by_default: bool = False
     #: Extra NetBox filter always applied to this family, on top of any configured one.
     base_query: str = ""
 
@@ -698,7 +697,6 @@ _IPAM: tuple[NetBoxObjectType, ...] = (
         icon="network",
         columns=("name", "status", "vlan", "role", "site"),
         search_fields=("name", "description"),
-        read_by_default=True,
         attributes={
             "prefix": _text("prefix", nullable=False),
             "status": _text("status.value"),
@@ -736,7 +734,6 @@ _IPAM: tuple[NetBoxObjectType, ...] = (
         icon="network",
         columns=("name", "status", "dns_name", "description"),
         search_fields=("name", "dns_name"),
-        read_by_default=True,
         attributes={
             "address": _text("address", nullable=False),
             "status": _text("status.value"),
@@ -765,7 +762,6 @@ _IPAM: tuple[NetBoxObjectType, ...] = (
         icon="layers",
         columns=("name", "vid", "status", "site", "role"),
         search_fields=("name",),
-        read_by_default=True,
         attributes={
             "vid": _int("vid"),
             "name": _text("name", nullable=False),
@@ -1372,24 +1368,19 @@ BY_ID: Mapping[str, NetBoxObjectType] = {entry.id: entry for entry in OBJECT_TYP
 #: Every catalogue id, sorted, for error messages and documentation.
 ALL_OBJECT_TYPE_IDS: tuple[str, ...] = tuple(sorted(BY_ID))
 
-#: What a provider reads when its config does not say: the families this plugin served
-#: before the catalogue existed. Upgrading must not multiply what a sync pulls.
-DEFAULT_OBJECT_TYPE_IDS: tuple[str, ...] = tuple(
-    sorted(entry.id for entry in OBJECT_TYPES if entry.read_by_default)
-)
-
 
 def resolve_object_type_ids(selection: Iterable[str] | None) -> tuple[str, ...]:
     """Normalize a configured ``object_types`` selection to catalogue ids.
 
-    ``None`` means the default selection; :data:`WILDCARD` anywhere in the list means
-    every family in the catalogue. Entries are stripped, deduplicated and sorted.
+    ``None`` means every family in the catalogue, as does :data:`WILDCARD` anywhere in
+    the list: this config narrows the space the platform may choose from, and an
+    unset narrowing narrows nothing. Entries are stripped, deduplicated and sorted.
 
     Raises:
         ValueError: When an entry names no catalogue family, listing the valid ids.
     """
     if selection is None:
-        return DEFAULT_OBJECT_TYPE_IDS
+        return ALL_OBJECT_TYPE_IDS
     wanted = {str(entry).strip() for entry in selection}
     wanted.discard("")
     if WILDCARD in wanted:

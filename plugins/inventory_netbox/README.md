@@ -40,7 +40,7 @@ rendered automatically and `token_ref` gets a secret picker.
 | `status_map` | no | built-in | Maps a NetBox device status slug to a maintenance state (`active`, `maintenance`, `disabled`) |
 | `field_map` | no | built-in | Maps normalized inventory fields → NetBox REST payload paths, including optional `access_config.*` refs under `custom_fields` |
 | `default_access_config` | no | `{}` | Access-config defaults applied to every device |
-| `object_types` | no | `null` | Which NetBox families to read beyond devices and sites. `null` = prefixes, IP addresses and VLANs; `["*"]` = all of them; or list ids. See [Object types](#object-types) |
+| `object_types` | no | `null` | A ceiling on which NetBox families this provider may read beyond devices and sites. `null` (or `["*"]`) = every family; list ids to put the rest out of reach. Normally left unset — the platform's own selection is the control. See [Object types](#object-types) |
 | `object_queries` | no | `{}` | Per-family NetBox filter, e.g. `{"interface": "mgmt_only=false"}` — `device_query` for everything that is not a device |
 | `query_cache_ttl_seconds` | no | `null` | Optional query cache TTL (0–86400 s) |
 | `timeout_seconds` | no | `10` | Per-request timeout |
@@ -214,29 +214,32 @@ device table, and a rack elevation is not worth a sync.
   inventory-object store with schema-driven list and detail pages, free-text search and
   filters, and no frontend code.
 
-Read by default: `ip_prefix`, `ip_address` and `vlan` — the three families this plugin
-served before the catalogue existed, so upgrading never multiplies what a sync pulls.
-
 ### Choosing what to read
 
-`object_types` names the families this provider reads:
+**The choice is made in Hegemony, not here.** Every family in the catalogue is declared
+as a supported resource, so the provider's *Object types to sync* selection in the
+provider form offers all of them, and a provider reads the ones ticked there. A family
+that is not ticked is not requested at all, and rows an earlier sync stored for it are
+marked **stale** on the next sync rather than left looking current.
+
+`object_types` is a *ceiling* above that selection, for the rare case where a family must
+be out of reach whatever anyone ticks — a read-only token that must never touch the
+interface table, say:
 
 ```json
 { "object_types": ["interface", "vlan", "virtual_machine", "circuit"] }
 ```
 
-- Omit it, or leave it `null`, for the default three.
-- `["*"]` reads every family in the catalogue, **including** ones a later plugin version
-  adds. The wildcard is stored as written rather than expanded, which is what makes that
-  true.
-- `[]` reads devices and sites only.
+- Omit it, or leave it `null`, for no ceiling: every family the plugin knows is offered.
+- `["*"]` is the same as unset, and stays true of families a later plugin version adds,
+  because the wildcard is stored as written rather than expanded.
+- `[]` allows devices and sites only.
 - A comma-separated string works too (`"rack, cable"`), and an id nothing serves is
   rejected by name, with the valid ids listed.
 
-A family this provider does not read is not requested at all, and rows an earlier sync
-stored for it are marked **stale** on the next sync rather than left looking current. The
-platform's own per-provider *Object types to sync* selection narrows this further: a
-family has to be read here **and** selected there.
+A family has to be under the ceiling **and** selected in the provider form to be read, so
+a narrowed ceiling makes the ticked-but-unreachable families in that form a lie. Leave it
+unset unless you mean it.
 
 ### Scoping each family
 
@@ -345,5 +348,5 @@ searches and renders it with. Field paths are dotted and a missing path is null 
 than an error, which is how one catalogue serves several NetBox releases.
 
 After installing the new wheel version and restarting, the family appears in the
-inventory submenu and in the provider form's type selection — no core change and no
-database migration. It is not read until a provider's `object_types` names it.
+Objects page's type picker and in the provider form's type selection — no core change
+and no database migration. It is read by any provider whose selection includes it.

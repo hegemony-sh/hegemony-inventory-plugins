@@ -15,7 +15,6 @@ from hegemony_inventory_sdk import MaintenanceState
 from .object_types import (
     ALL_OBJECT_TYPE_IDS,
     BY_ID,
-    DEFAULT_OBJECT_TYPE_IDS,
     WILDCARD,
     resolve_object_type_ids,
 )
@@ -130,13 +129,14 @@ class NetBoxProviderConfig(BaseModel):
     object_types: list[str] | None = Field(
         None,
         description=(
-            "Which NetBox object families this provider reads, beyond devices and sites "
-            "(which are always read). Omit or leave null for "
-            f"{', '.join(DEFAULT_OBJECT_TYPE_IDS)}; use ['{WILDCARD}'] for every family "
-            "the plugin knows, including ones a later version adds; or list ids "
-            "explicitly, e.g. ['interface', 'vlan', 'virtual_machine']. NetBox's "
-            "interface, IP address and cable tables are far larger than its device "
-            "table, so read them deliberately. Valid ids: "
+            "A ceiling on which NetBox object families this provider may read, beyond "
+            "devices and sites (which are always read). Leave it unset: the platform's "
+            "own object-type selection on this provider is where the everyday choice "
+            "is made, and an unset ceiling offers it every family the plugin knows, "
+            "including ones a later version adds. Set it only to put a family out of "
+            "reach whatever is selected there, e.g. ['interface', 'vlan', "
+            f"'virtual_machine'] (['{WILDCARD}'] means every family, the same as unset). "
+            "Valid ids: "
             f"{', '.join(ALL_OBJECT_TYPE_IDS)}."
         ),
     )

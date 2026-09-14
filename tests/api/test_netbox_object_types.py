@@ -153,13 +153,15 @@ def test_every_catalogue_entry_is_well_formed(entry: catalogue.NetBoxObjectType)
     assert set(mapping.field_map) == set(entry.attributes)
 
 
-def test_catalogue_ids_are_unique_and_defaults_are_the_original_three() -> None:
+def test_catalogue_ids_are_unique_and_an_unset_config_offers_them_all() -> None:
     ids = [entry.id for entry in catalogue.OBJECT_TYPES]
     assert len(ids) == len(set(ids)), "duplicate ids would collide in the platform registry"
     assert tuple(sorted(ids)) == catalogue.ALL_OBJECT_TYPE_IDS
-    # Reading more than this is opt-in: upgrading the plugin must not multiply what an
-    # existing provider pulls on its next sync.
-    assert catalogue.DEFAULT_OBJECT_TYPE_IDS == ("ip_address", "ip_prefix", "vlan")
+    # The config is a ceiling, and an unset ceiling stops nothing: what a provider
+    # actually reads is the platform's own object-type selection, which cannot widen
+    # past what the provider declares it serves.
+    assert catalogue.resolve_object_type_ids(None) == catalogue.ALL_OBJECT_TYPE_IDS
+    assert catalogue.resolve_object_type_ids([catalogue.WILDCARD]) == catalogue.ALL_OBJECT_TYPE_IDS
 
 
 def test_the_readme_documents_every_catalogue_family() -> None:
@@ -185,16 +187,15 @@ def test_register_declares_every_catalogue_family() -> None:
     assert set(provider_type["supported_resources"]) == _CORE_RESOURCES | set(
         catalogue.ALL_OBJECT_TYPE_IDS
     )
-    assert provider_type["default_config"]["object_types"] == list(
-        catalogue.DEFAULT_OBJECT_TYPE_IDS
-    )
+    # The form must not pin a narrower ceiling into a new provider's config: that is
+    # what made a ticked object type sync nothing at all.
+    assert "object_types" not in provider_type["default_config"]
 
 
 def test_a_provider_reads_only_the_families_its_config_names() -> None:
-    assert _object_types(_provider()) == _CORE_RESOURCES | {"ip_prefix", "ip_address", "vlan"}
-    assert _object_types(_provider({"object_types": [catalogue.WILDCARD]})) == (
-        _CORE_RESOURCES | set(catalogue.ALL_OBJECT_TYPE_IDS)
-    )
+    every = _CORE_RESOURCES | set(catalogue.ALL_OBJECT_TYPE_IDS)
+    assert _object_types(_provider()) == every
+    assert _object_types(_provider({"object_types": [catalogue.WILDCARD]})) == every
     scoped = _provider({"object_types": ["interface", "rack"]})
     assert _object_types(scoped) == _CORE_RESOURCES | {"interface", "rack"}
     # Devices and sites are never deselectable: they are the platform's own tables.

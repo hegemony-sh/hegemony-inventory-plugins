@@ -14,7 +14,7 @@ from hegemony_inventory_sdk import (
 )
 
 from .config import NetBoxProviderConfig
-from .object_types import ALL_OBJECT_TYPE_IDS, DEFAULT_OBJECT_TYPE_IDS, object_type_specs
+from .object_types import ALL_OBJECT_TYPE_IDS, object_type_specs
 from .provider import NetBoxInventoryProvider
 
 
@@ -28,10 +28,10 @@ def register(registry: InventoryPluginRegistry) -> None:
     """Entry point for the ``hegemony.inventory_plugins`` group.
 
     Every family in ``object_types.OBJECT_TYPES`` is registered, which is what makes it
-    selectable and renderable; which of them a given provider actually reads is its
-    ``object_types`` config. The two are deliberately different questions: the platform
-    needs the whole space to offer a choice from, and an operator needs the choice to
-    stay small.
+    selectable and renderable, and every one is declared as a supported resource, which
+    is what lets the platform's own object-type selection reach it. A provider reads the
+    families that selection names; its ``object_types`` config is a ceiling above it,
+    unset by default, not a second place the everyday choice is made.
     """
     for spec in object_type_specs():
         registry.register_object_type(spec)
@@ -52,7 +52,6 @@ def register(registry: InventoryPluginRegistry) -> None:
         config_model=NetBoxProviderConfig,
         default_config={
             "verify_tls": True,
-            "object_types": list(DEFAULT_OBJECT_TYPE_IDS),
             "query_cache_ttl_seconds": None,
             "timeout_seconds": 10.0,
         },

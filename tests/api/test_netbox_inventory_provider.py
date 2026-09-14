@@ -339,8 +339,14 @@ def test_netbox_mapping_uses_generic_field_map_and_default_access_config() -> No
 
 
 def test_netbox_supports_ipam_object_types() -> None:
-    """A provider reads devices, sites and the default families unless told otherwise."""
-    assert _object_types(_provider()) == {"device", "site", "ip_prefix", "ip_address", "vlan"}
+    """A provider offers devices, sites and every family unless its config narrows it."""
+    offered = _object_types(_provider())
+    assert {"device", "site", "ip_prefix", "ip_address", "vlan"} <= offered
+    assert _object_types(_provider({"object_types": ["ip_prefix"]})) == {
+        "device",
+        "site",
+        "ip_prefix",
+    }
 
 
 @pytest.mark.asyncio
@@ -703,8 +709,8 @@ async def test_netbox_get_object_fetches_the_ipam_detail_endpoint(
 
 @pytest.mark.asyncio
 async def test_netbox_get_object_rejects_an_unserved_object_type() -> None:
-    """A type the provider does not serve still fails closed."""
-    provider = _provider()
+    """A type the provider's ceiling puts out of reach still fails closed."""
+    provider = _provider({"object_types": ["ip_prefix"]})
 
     with pytest.raises(InventoryProviderError) as excinfo:
         await provider.get_object(
