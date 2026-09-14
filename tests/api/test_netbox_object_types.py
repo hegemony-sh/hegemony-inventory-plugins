@@ -513,6 +513,36 @@ def test_a_browse_column_never_names_the_spelling_a_current_netbox_dropped(
     )
 
 
+#: The families that surface a replaced field in their browse table, and the spelling
+#: that has to appear there. Declared as intent rather than derived from the catalogue:
+#: a derived set moves with the column it describes, so it could never catch the column
+#: being deleted -- which is the regression this guards. Families whose replaced pair is
+#: not a column at all are deliberately absent (a contact's `groups` and the two MAC
+#: fields are searchable, never columns), so they are not forced to become one.
+_REPLACED_FIELD_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("ip_prefix", "scope"),
+    ("cluster", "scope"),
+    ("circuit_termination", "termination"),
+    ("service", "parent"),
+)
+
+
+@pytest.mark.parametrize(("family", "generic"), _REPLACED_FIELD_COLUMNS)
+def test_a_family_that_browses_a_replaced_field_shows_the_generic_spelling(
+    family: str, generic: str
+) -> None:
+    """The other half of the column rule: the right spelling is present, not just absent.
+
+    Rejecting the legacy spelling alone would still pass if the column were dropped
+    altogether, leaving the browse table with no scope at all rather than a wrong one.
+    """
+    entry = catalogue.BY_ID[family]
+    assert generic in entry.columns, (
+        f"{family}: browse columns no longer show {generic!r}, so the value a supported "
+        f"NetBox serves is not in the table at all"
+    )
+
+
 @pytest.mark.parametrize(("family", "legacy", "generic"), _VERSION_REPLACED_FIELDS)
 def test_a_searchable_field_stays_searchable_across_the_version_split(
     family: str, legacy: str, generic: str

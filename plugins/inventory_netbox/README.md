@@ -314,9 +314,11 @@ space, and an absent attribute simply never matches, so naming both makes the va
 findable on either side of the rename while naming one leaves it unfindable on the other.
 That is why an interface is searchable by `mac_address` and by `primary_mac_address`.
 
-Both rules are enforced, not conventions: `_VERSION_REPLACED_FIELDS` in
-`tests/api/test_netbox_object_types.py` lists every replaced pair, and a parametrised test
-fails if a column names a dropped spelling or if search offers only one of a pair.
+Both rules are enforced, not conventions. `_VERSION_REPLACED_FIELDS` in
+`tests/api/test_netbox_object_types.py` lists every replaced pair and
+`_REPLACED_FIELD_COLUMNS` lists the families that browse one, and parametrized tests fail
+if a column names a dropped spelling, if a family that browses a replaced field stops
+showing the generic one, or if search offers only one spelling of a pair.
 
 ## Adding an object type
 
