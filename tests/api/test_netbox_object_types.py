@@ -164,6 +164,15 @@ def test_catalogue_ids_are_unique_and_an_unset_config_offers_them_all() -> None:
     assert catalogue.resolve_object_type_ids([catalogue.WILDCARD]) == catalogue.ALL_OBJECT_TYPE_IDS
 
 
+def test_every_family_is_grouped_under_its_netbox_app() -> None:
+    """Fifty flat checkboxes are not a choice; the platform groups them by this."""
+    for entry in catalogue.OBJECT_TYPES:
+        assert entry.spec.group == catalogue.APP_GROUPS[entry.app], entry.id
+    assert {entry.spec.group for entry in catalogue.OBJECT_TYPES} == set(
+        catalogue.APP_GROUPS.values()
+    )
+
+
 def test_the_readme_documents_every_catalogue_family() -> None:
     """The catalogue table in the README is a promise; drift makes it a lie."""
     readme = (

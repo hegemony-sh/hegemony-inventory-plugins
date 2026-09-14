@@ -89,6 +89,21 @@ def _rel(rel: str, target: str, source: str) -> RelationshipMapping:
     return RelationshipMapping(rel=rel, target_object_type=target, source=source)
 
 
+#: NetBox app label -> the name an operator sees it under. NetBox's own apps are the
+#: division its own navigation uses, so grouping the catalogue any other way would
+#: invent a second vocabulary for the same fifty things.
+APP_GROUPS: Mapping[str, str] = {
+    "circuits": "Circuits",
+    "dcim": "DCIM",
+    "extras": "Extras",
+    "ipam": "IPAM",
+    "tenancy": "Tenancy",
+    "virtualization": "Virtualization",
+    "vpn": "VPN",
+    "wireless": "Wireless",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class NetBoxObjectType:
     """One NetBox family: how to read it, and how the platform should present it."""
@@ -99,7 +114,9 @@ class NetBoxObjectType:
     plural: str
     description: str
     attributes: Mapping[str, Attr]
-    #: NetBox app the endpoint belongs to, for grouping in docs and errors.
+    #: NetBox app the endpoint belongs to. It is also the family grouping the platform
+    #: presents the fifty types under, because NetBox's own apps are the division an
+    #: operator already thinks in -- see :data:`APP_GROUPS`.
     app: str = "dcim"
     #: Record path whose value becomes the object's name. ``display`` is NetBox's own
     #: human label and exists on every object, so it is the safe default.
@@ -137,6 +154,7 @@ class NetBoxObjectType:
             display_name=self.display_name,
             plural=self.plural,
             description=self.description,
+            group=APP_GROUPS.get(self.app, self.app.upper()),
             field_schema={
                 "type": "object",
                 "properties": {name: attr.schema for name, attr in self.attributes.items()},

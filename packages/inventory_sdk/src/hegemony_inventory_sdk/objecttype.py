@@ -51,6 +51,10 @@ class ObjectTypeSpec:
     display_name: str
     plural: str | None = None
     description: str | None = None
+    #: Display grouping for a plugin that registers many types, e.g. "IPAM" or "DCIM".
+    #: A source system's own families are the natural grouping, and a flat list of
+    #: fifty checkboxes is not a choice anyone can make. ``None`` groups with the rest.
+    group: str | None = None
     field_schema: Mapping[str, Any] = field(default_factory=dict)
     identity_keys: tuple[str, ...] = ()
     relationships: tuple[ObjectTypeRelationshipSpec, ...] = ()
@@ -65,6 +69,7 @@ class ObjectTypeSpec:
         model: Any,
         plural: str | None = None,
         description: str | None = None,
+        group: str | None = None,
         identity_keys: Sequence[str] = (),
         relationships: Sequence[ObjectTypeRelationshipSpec] = (),
         ui: ObjectTypeUIHints | None = None,
@@ -75,6 +80,7 @@ class ObjectTypeSpec:
             display_name=display_name,
             plural=plural,
             description=description,
+            group=group,
             field_schema=model.model_json_schema(),
             identity_keys=tuple(identity_keys),
             relationships=tuple(relationships),

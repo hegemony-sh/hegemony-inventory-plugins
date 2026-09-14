@@ -266,8 +266,11 @@ caller that happens to know its id.
 
 ### The catalogue
 
-50 families, grouped by NetBox app. Ids are stable: they are stored on every row and
-referenced by authored flow forms.
+50 families, grouped by NetBox app. Each family carries that app as its
+`ObjectTypeSpec.group`, which is how the platform's *Object types to sync* selection
+shows them as a tree — DCIM, IPAM, Circuits and the rest — rather than fifty flat
+checkboxes. Ids are stable: they are stored on every row and referenced by authored flow
+forms.
 
 | NetBox app | Families |
 | --- | --- |
