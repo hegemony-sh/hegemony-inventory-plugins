@@ -23,7 +23,6 @@ from hegemony_inventory_sdk import (
     InventoryProviderError,
     MaintenanceState,
     ObjectDescriptor,
-    ObjectFieldMapping,
     PlatformServices,
     ProviderCallContext,
     ProviderErrorCode,
@@ -37,6 +36,7 @@ from hegemony_inventory_sdk import (
 )
 
 from .config import DEFAULT_FIELD_MAP, NetBoxProviderConfig
+from .object_types import ALL_OBJECT_TYPE_IDS, NetBoxObjectType, sources_for
 
 KNOWN_AUTH_SCHEMES = frozenset({"bearer", "token", "basic"})
 
@@ -99,74 +99,6 @@ def _assign_nested(target: dict[str, Any], path: str, value: Any) -> None:
     current[parts[-1]] = value
 
 
-# IPAM/VLAN object types served beyond device/site. Each entry pairs a NetBox API
-# endpoint with a declarative record -> ObjectDescriptor mapping (see ``map_records``);
-# adding a new type is one more entry here plus a matching ObjectTypeSpec in __init__.
-_IPAM_OBJECT_SOURCES: dict[str, tuple[str, ObjectFieldMapping]] = {
-    ResourceType.IP_PREFIX.value: (
-        "/api/ipam/prefixes/",
-        ObjectFieldMapping(
-            object_type=ResourceType.IP_PREFIX.value,
-            identity="id",
-            name_field="prefix",
-            field_map={
-                "prefix": "prefix",
-                "status": "status.value",
-                "vlan": "vlan.vid",
-                "role": "role.slug",
-                # NetBox 4.2 replaced Prefix.site with a generic scope, which can be a
-                # site, a region, a site group or a location. Both spellings are mapped:
-                # `site` still resolves on a pre-4.2 NetBox and is simply absent after,
-                # and `scope`/`scope_type` carry the newer shape -- with the type named,
-                # because a bare slug labelled "site" would be a lie when the prefix is
-                # actually scoped to a region.
-                "site": "site.slug",
-                "scope": "scope.name",
-                "scope_type": "scope_type",
-                "tenant": "tenant.slug",
-                "is_pool": "is_pool",
-                "description": "description",
-            },
-        ),
-    ),
-    ResourceType.IP_ADDRESS.value: (
-        "/api/ipam/ip-addresses/",
-        ObjectFieldMapping(
-            object_type=ResourceType.IP_ADDRESS.value,
-            identity="id",
-            name_field="address",
-            field_map={
-                "address": "address",
-                "status": "status.value",
-                "role": "role.value",
-                "dns_name": "dns_name",
-                "vrf": "vrf.name",
-                "tenant": "tenant.slug",
-                "description": "description",
-            },
-        ),
-    ),
-    ResourceType.VLAN.value: (
-        "/api/ipam/vlans/",
-        ObjectFieldMapping(
-            object_type=ResourceType.VLAN.value,
-            identity="id",
-            name_field="name",
-            field_map={
-                "vid": "vid",
-                "name": "name",
-                "status": "status.value",
-                "site": "site.slug",
-                "group": "group.name",
-                "role": "role.slug",
-                "tenant": "tenant.slug",
-                "description": "description",
-            },
-        ),
-    ),
-}
-
-
 # NetBox keeps TWO independent nested hierarchies above a site -- Region
 # (geography) and SiteGroup (function) -- and a site carries a nullable foreign
 # key to each. A platform Site has a single ``parent_id``, so the two cannot both
@@ -189,14 +121,13 @@ _SITE_TREE_SOURCES: dict[str, tuple[str, str, str, str]] = {
 class NetBoxInventoryProvider(InventoryProvider):
     provider_type = "netbox"
     capabilities = frozenset({Capability.READ, Capability.QUERY})
+    # Every family in the catalogue, plus devices and sites. This is the whole space
+    # the provider can read, and it is deliberately not narrowed per instance: which
+    # of them a given provider actually syncs is the platform's own object-type
+    # selection, and a second narrowing here is what once made a ticked type sync
+    # nothing at all.
     supported_resources = frozenset(
-        {
-            ResourceType.DEVICE,
-            ResourceType.SITE,
-            ResourceType.IP_PREFIX,
-            ResourceType.IP_ADDRESS,
-            ResourceType.VLAN,
-        }
+        {ResourceType.DEVICE.value, ResourceType.SITE.value, *ALL_OBJECT_TYPE_IDS}
     )
     config_schema = NetBoxProviderConfig.model_json_schema()
 
@@ -206,6 +137,7 @@ class NetBoxInventoryProvider(InventoryProvider):
         self.id = provider_id
         self.config = NetBoxProviderConfig.model_validate(config or {})
         self._services = services
+        self._object_sources: dict[str, NetBoxObjectType] = sources_for(ALL_OBJECT_TYPE_IDS)
 
     async def list(
         self,
@@ -472,18 +404,16 @@ class NetBoxInventoryProvider(InventoryProvider):
         cursor: str | None = None,
         context: ProviderCallContext,
     ) -> builtins.list[ObjectDescriptor]:
-        source = _IPAM_OBJECT_SOURCES.get(object_type)
+        source = self._object_sources.get(object_type)
         if source is None:
-            # device/site (and anything else) fall back to the SDK default, which
-            # delegates to query_devices/list_sites or raises "not supported".
+            # device/site (and a family this provider is not configured to read) fall
+            # back to the SDK default, which delegates to query_devices/list_sites or
+            # raises "not supported".
             return await super().list_objects(
                 object_type, query, limit=limit, cursor=cursor, context=context
             )
-        endpoint, mapping = source
-        expr = _query_to_expr(query)
-        path = f"{endpoint}?{expr}" if expr else endpoint
         items = await self._paginated(
-            path,
+            self._object_path(source, _query_to_expr(query)),
             context,
             page_limit=self._services.limits.max_provider_pages,
             result_limit=limit or self._services.limits.max_run_targets,
@@ -491,9 +421,27 @@ class NetBoxInventoryProvider(InventoryProvider):
         return [
             self._with_provider_url(descriptor, item)
             for descriptor, item in zip(
-                map_records(items, mapping, provider_id=self.id), items, strict=True
+                map_records(items, source.mapping, provider_id=self.id), items, strict=True
             )
         ]
+
+    def _object_scope(self, source: NetBoxObjectType) -> str:
+        """The filter this provider always applies to a family, built in and configured.
+
+        This is the whole of what a provider is allowed to see of a family, so every read
+        of it -- a list or a single object -- has to go through this.
+        """
+        configured = self.config.object_queries.get(source.id, "")
+        return "&".join(part for part in (source.base_query, configured) if part)
+
+    def _object_path(self, source: NetBoxObjectType, expr: str) -> str:
+        """The endpoint for one family, scoped by its configured and caller filters.
+
+        Same shape as ``device_query``: the configured baseline narrows every read of
+        the family, a caller expression is appended, and NetBox ANDs the two.
+        """
+        parts = [part for part in (self._object_scope(source), expr.lstrip("?")) if part]
+        return f"{source.endpoint}?{'&'.join(parts)}" if parts else source.endpoint
 
     async def get_object(
         self,
@@ -504,24 +452,58 @@ class NetBoxInventoryProvider(InventoryProvider):
     ) -> ObjectDescriptor:
         """Fetch one object of ``object_type``.
 
-        The IPAM types are served from the same endpoint/mapping table as
-        ``list_objects``; without this override they fell through to the SDK
-        default, which only knows device and site, so every IPAM detail page
-        raised "not supported".
+        Served from the same catalogue as ``list_objects``; without this override the
+        generic families fell through to the SDK default, which only knows device and
+        site, so every object detail page raised "not supported".
         """
-        source = _IPAM_OBJECT_SOURCES.get(object_type)
+        source = self._object_sources.get(object_type)
         if source is None:
             return await super().get_object(object_type, external_id, context=context)
-        endpoint, mapping = source
-        identifier = quote(str(external_id).strip(), safe="")
+        identifier = str(external_id).strip()
         if not identifier:
             raise self._error(
                 ProviderErrorCode.NOT_FOUND,
                 "NetBox object id is empty",
                 context.operation,
             )
-        payload = await self._request_json(f"{endpoint}{identifier}/", context)
-        return self._with_provider_url(map_record(payload, mapping, provider_id=self.id), payload)
+        payload = await self._object_payload(source, identifier, context)
+        return self._with_provider_url(
+            map_record(payload, source.mapping, provider_id=self.id), payload
+        )
+
+    async def _object_payload(
+        self, source: NetBoxObjectType, identifier: str, context: ProviderCallContext
+    ) -> dict[str, Any]:
+        """One object's raw payload, honouring the filter that scopes its family.
+
+        NetBox's detail endpoint takes no filters, so reading it directly would hand back
+        an object from outside the configured ``object_queries`` scope to any caller that
+        knows its id -- a provider narrowed to one site answering for another. Where a
+        scope is configured the id is resolved through the filtered list endpoint instead
+        (``id`` is a filter every NetBox family supports), which leaves an object outside
+        the scope indistinguishable from one that does not exist. Unscoped families keep
+        the cheaper direct read.
+        """
+        if not self._object_scope(source):
+            return await self._request_json(
+                f"{source.endpoint}{quote(identifier, safe='')}/", context
+            )
+        matches = await self._paginated(
+            self._object_path(source, _query_to_expr({"id": identifier})),
+            context,
+            page_limit=self._services.limits.max_provider_pages,
+            # `id` is NetBox's primary key, so at most one row can match; asking for two
+            # would make the pager chase a second page that cannot hold a match.
+            result_limit=1,
+        )
+        if not matches:
+            raise self._error(
+                ProviderErrorCode.NOT_FOUND,
+                f"NetBox {source.display_name} {identifier} was not found within this "
+                "provider's configured object query",
+                context.operation,
+            )
+        return matches[0]
 
     async def test_connection(self, *, context: ProviderCallContext) -> ProviderTestResult:
         start = monotonic()

@@ -42,6 +42,14 @@ def _provider(
     )
 
 
+def _object_types(provider: NetBoxInventoryProvider) -> set[str]:
+    """``supported_resources`` as object-type strings, enum members or not."""
+    return {
+        resource.value if isinstance(resource, ResourceType) else str(resource)
+        for resource in provider.supported_resources
+    }
+
+
 def _install_transport(
     monkeypatch: pytest.MonkeyPatch,
     handler: httpx.MockTransport,
@@ -331,8 +339,9 @@ def test_netbox_mapping_uses_generic_field_map_and_default_access_config() -> No
 
 
 def test_netbox_supports_ipam_object_types() -> None:
-    supported = {resource.value for resource in _provider().supported_resources}
-    assert {"device", "site", "ip_prefix", "ip_address", "vlan"} <= supported
+    """A provider offers devices, sites and every catalogued family, always."""
+    offered = _object_types(_provider())
+    assert {"device", "site", "ip_prefix", "ip_address", "vlan"} <= offered
 
 
 @pytest.mark.asyncio
@@ -395,6 +404,7 @@ async def test_netbox_list_objects_maps_ip_prefixes(monkeypatch: pytest.MonkeyPa
         "site": "ams01",
         "scope": None,
         "scope_type": None,
+        "vrf": None,
         "tenant": None,
         "is_pool": False,
         "description": "core",
@@ -694,12 +704,12 @@ async def test_netbox_get_object_fetches_the_ipam_detail_endpoint(
 
 @pytest.mark.asyncio
 async def test_netbox_get_object_rejects_an_unserved_object_type() -> None:
-    """A type the provider does not serve still fails closed."""
+    """A type the catalogue does not know still fails closed."""
     provider = _provider()
 
     with pytest.raises(InventoryProviderError) as excinfo:
         await provider.get_object(
-            "circuit",
+            "unicorn",
             "1",
             context=ProviderCallContext(provider_id="netbox:primary", operation="get_object"),
         )

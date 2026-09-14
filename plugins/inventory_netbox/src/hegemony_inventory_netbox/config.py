@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 from hegemony_inventory_sdk import MaintenanceState
+
+from .object_types import ALL_OBJECT_TYPE_IDS, BY_ID
 
 # NetBox device statuses -> the platform's MaintenanceState. "Gone or going" is
 # disabled; "not yet in service" is maintenance. Anything unlisted (including
@@ -119,6 +121,15 @@ class NetBoxProviderConfig(BaseModel):
     )
     field_map: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_FIELD_MAP))
     default_access_config: dict[str, Any] = Field(default_factory=dict)
+    object_queries: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-family NetBox filter applied to every read of that family, the way "
+            "device_query scopes devices, e.g. {'interface': 'mgmt_only=false', "
+            "'ip_prefix': 'status=active'}. Keys are object type ids; a caller-supplied "
+            "query is appended to the configured one."
+        ),
+    )
     query_cache_ttl_seconds: int | None = Field(None, ge=0, le=86400)
     timeout_seconds: float = Field(10.0, gt=0, le=120)
 
@@ -166,6 +177,47 @@ class NetBoxProviderConfig(BaseModel):
         if value is None:
             return ""
         return str(value).strip()
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_retired_object_types(cls, value: Any) -> Any:
+        """Ignore a stored ``object_types``, which briefly duplicated a platform control.
+
+        This config once carried a ceiling on which families the provider could read.
+        The platform asks the same question on the provider form, and two controls for
+        one choice is how a ticked object type came to sync nothing, so the ceiling is
+        gone. A config written while it existed still has to validate: ``extra="forbid"``
+        would otherwise reject it outright rather than ignore a key that no longer means
+        anything.
+        """
+        if isinstance(value, dict) and "object_types" in value:
+            value = {key: item for key, item in value.items() if key != "object_types"}
+        return value
+
+    @field_validator("object_queries")
+    @classmethod
+    def validate_object_queries(cls, value: dict[str, str]) -> dict[str, str]:
+        """Normalize per-family queries and reject keys naming no known family."""
+        normalized: dict[str, str] = {}
+        unknown: list[str] = []
+        for object_type, query in value.items():
+            if not isinstance(object_type, str):
+                continue
+            key = object_type.strip()
+            if not key:
+                continue
+            if key not in BY_ID:
+                unknown.append(key)
+                continue
+            expression = str(query).strip().lstrip("?").strip() if query is not None else ""
+            if expression:
+                normalized[key] = expression
+        if unknown:
+            raise ValueError(
+                f"object_queries has unknown NetBox object type(s): {', '.join(sorted(unknown))}. "
+                f"Valid ids are: {', '.join(ALL_OBJECT_TYPE_IDS)}"
+            )
+        return normalized
 
     @field_validator("status_map")
     @classmethod
