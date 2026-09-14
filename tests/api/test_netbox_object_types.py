@@ -489,6 +489,63 @@ def test_the_legacy_spelling_still_resolves_on_an_older_netbox() -> None:
     ] == [("site", "ams01")]
 
 
+def test_a_pre_4_2_circuit_termination_traverses_to_both_of_its_legacy_targets() -> None:
+    """Site and provider network are each a fixed foreign key, so each gets an edge.
+
+    A termination lands either in a site or in a carrier's own network, and before 4.2
+    those were two separate fields. Emitting an edge for only one of them makes the
+    other reachable as text and nothing else.
+    """
+    in_a_site = map_record(
+        {
+            "id": 8,
+            "display": "Termination A",
+            "circuit": {"id": 4, "cid": "CID-001"},
+            "term_side": "A",
+            "site": {"id": 5, "name": "AMS 01", "slug": "ams01"},
+        },
+        catalogue.BY_ID["circuit_termination"].mapping,
+        provider_id="netbox:primary",
+    )
+    assert {
+        (relationship.rel, relationship.target_external_id)
+        for relationship in in_a_site.relationships
+    } == {("circuit", "4"), ("site", "ams01")}
+
+    in_a_provider_network = map_record(
+        {
+            "id": 9,
+            "display": "Termination Z",
+            "circuit": {"id": 4, "cid": "CID-001"},
+            "term_side": "Z",
+            "provider_network": {"id": 12, "name": "Carrier Cloud"},
+        },
+        catalogue.BY_ID["circuit_termination"].mapping,
+        provider_id="netbox:primary",
+    )
+    assert in_a_provider_network.attributes["provider_network"] == "Carrier Cloud"
+    assert {
+        (relationship.rel, relationship.target_external_id)
+        for relationship in in_a_provider_network.relationships
+    } == {("circuit", "4"), ("provider_network", "12")}
+
+    # On 4.2+ neither field is served, so neither edge is emitted.
+    generic = map_record(
+        {
+            "id": 10,
+            "display": "Termination A",
+            "circuit": {"id": 4, "cid": "CID-001"},
+            "term_side": "A",
+            "termination_type": "dcim.site",
+            "termination": {"id": 5, "name": "AMS 01"},
+        },
+        catalogue.BY_ID["circuit_termination"].mapping,
+        provider_id="netbox:primary",
+    )
+    assert generic.attributes["termination"] == "AMS 01"
+    assert {relationship.rel for relationship in generic.relationships} == {"circuit"}
+
+
 def test_the_config_rejects_families_nothing_serves_and_forgets_the_retired_setting() -> None:
     base = {"url": "https://netbox.example", "token_ref": "vault://netbox/token"}
 

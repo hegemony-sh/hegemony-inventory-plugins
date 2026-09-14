@@ -1200,7 +1200,7 @@ _CIRCUITS: tuple[NetBoxObjectType, ...] = (
             # NetBox 4.2 replaced the site and provider_network foreign keys with one
             # generic `termination`, which may be a region, site group, site, location or
             # provider network. All three spellings are mapped so one catalogue serves
-            # either release; the legacy site edge below resolves only pre-4.2.
+            # either release; the two legacy edges below resolve only pre-4.2.
             "site": _text("site.slug"),
             "provider_network": _text("provider_network.name"),
             "termination": _text("termination.name"),
@@ -1212,7 +1212,12 @@ _CIRCUITS: tuple[NetBoxObjectType, ...] = (
         },
         relationships=(
             _rel("circuit", "circuit", "circuit.id"),
+            # Both pre-4.2 targets get an edge, not just the site: each is a fixed
+            # foreign key to something this catalogue registers, so both are traversable
+            # where the generic `termination` -- polymorphic, and so attribute-only --
+            # cannot be. On 4.2+ neither field is served and both edges are omitted.
             _rel("site", ResourceType.SITE.value, "site.slug"),
+            _rel("provider_network", "provider_network", "provider_network.id"),
         ),
     ),
 )
