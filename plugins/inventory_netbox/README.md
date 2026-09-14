@@ -309,6 +309,15 @@ legacy value is still stored, still searchable, and still shown on the object's 
 which lists every attribute. Listing both spellings as columns would instead leave every
 operator one permanently empty column, whichever release they run.
 
+**Search fields go the other way and list both spellings.** A search field costs no screen
+space, and an absent attribute simply never matches, so naming both makes the value
+findable on either side of the rename while naming one leaves it unfindable on the other.
+That is why an interface is searchable by `mac_address` and by `primary_mac_address`.
+
+Both rules are enforced, not conventions: `_VERSION_REPLACED_FIELDS` in
+`tests/api/test_netbox_object_types.py` lists every replaced pair, and a parametrised test
+fails if a column names a dropped spelling or if search offers only one of a pair.
+
 ## Adding an object type
 
 One entry in `OBJECT_TYPES` in `src/hegemony_inventory_netbox/object_types.py`, and

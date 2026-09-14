@@ -469,6 +469,70 @@ def test_the_generic_scopes_netbox_moved_to_are_mapped(
     )
 
 
+#: Every field NetBox replaced with a generic one, as (family, legacy, generic).
+#: A given server serves exactly one of each pair, which is why both are mapped --
+#: and why naming the wrong one in a column or a search list is a silent defect
+#: rather than an error. The table is checked against the catalogue below, so it
+#: cannot drift away from what is actually mapped.
+_VERSION_REPLACED_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("ip_prefix", "site", "scope"),
+    ("cluster", "site", "scope"),
+    ("circuit_termination", "site", "termination"),
+    ("circuit_termination", "provider_network", "termination"),
+    ("service", "device", "parent"),
+    ("service", "virtual_machine", "parent"),
+    ("contact", "group", "groups"),
+    ("interface", "mac_address", "primary_mac_address"),
+    ("vm_interface", "mac_address", "primary_mac_address"),
+)
+
+
+@pytest.mark.parametrize(("family", "legacy", "generic"), _VERSION_REPLACED_FIELDS)
+def test_both_spellings_of_a_replaced_field_are_mapped(
+    family: str, legacy: str, generic: str
+) -> None:
+    """Keeps the table above honest: a pair nothing maps would make the two tests vacuous."""
+    attributes = catalogue.BY_ID[family].attributes
+    assert legacy in attributes, f"{family}: {legacy} is not mapped"
+    assert generic in attributes, f"{family}: {generic} is not mapped"
+
+
+@pytest.mark.parametrize(("family", "legacy", "generic"), _VERSION_REPLACED_FIELDS)
+def test_a_browse_column_never_names_the_spelling_a_current_netbox_dropped(
+    family: str, legacy: str, generic: str
+) -> None:
+    """Columns take the generic spelling, so no operator gets a permanently empty one.
+
+    This is the README's stated policy. ``ip_prefix`` broke it and shipped a blank
+    Site column on every NetBox 4.2 and later, where a prefix carries ``scope``.
+    """
+    entry = catalogue.BY_ID[family]
+    assert legacy not in entry.columns, (
+        f"{family}: column {legacy!r} is absent on a supported NetBox; "
+        f"use {generic!r}, which is what such a server serves"
+    )
+
+
+@pytest.mark.parametrize(("family", "legacy", "generic"), _VERSION_REPLACED_FIELDS)
+def test_a_searchable_field_stays_searchable_across_the_version_split(
+    family: str, legacy: str, generic: str
+) -> None:
+    """Search lists both spellings, unlike columns.
+
+    A search field costs no screen space, so listing both makes the value findable on
+    either side of the rename; one alone leaves it unfindable on the other. Interface
+    and VM interface listed only ``mac_address``, so searching by MAC matched nothing
+    on a NetBox that serves ``primary_mac_address``.
+    """
+    entry = catalogue.BY_ID[family]
+    if legacy not in entry.search_fields and generic not in entry.search_fields:
+        pytest.skip(f"{family} does not offer {legacy}/{generic} for search")
+    assert legacy in entry.search_fields and generic in entry.search_fields, (
+        f"{family}: search offers only one of {legacy!r}/{generic!r}, so the value is "
+        f"unfindable on the NetBox releases that serve the other"
+    )
+
+
 def test_the_legacy_spelling_still_resolves_on_an_older_netbox() -> None:
     """The pre-4.2 payload keeps working, edge included; that is why both are mapped."""
     descriptor = map_record(

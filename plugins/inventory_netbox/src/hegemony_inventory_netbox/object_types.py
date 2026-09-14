@@ -392,7 +392,7 @@ _DCIM: tuple[NetBoxObjectType, ...] = (
         identity_keys=("device", "name"),
         icon="ethernet-port",
         columns=("name", "device", "type", "enabled", "mode"),
-        search_fields=("name", "description", "mac_address"),
+        search_fields=("name", "description", "mac_address", "primary_mac_address"),
         attributes={
             "name": _text("name", nullable=False),
             "device": _text("device.name"),
@@ -709,7 +709,7 @@ _IPAM: tuple[NetBoxObjectType, ...] = (
         name_field="prefix",
         identity_keys=("prefix",),
         icon="network",
-        columns=("name", "status", "vlan", "role", "site"),
+        columns=("name", "status", "vlan", "role", "scope"),
         search_fields=("name", "description"),
         attributes={
             "prefix": _text("prefix", nullable=False),
@@ -1080,7 +1080,7 @@ _VIRTUALIZATION: tuple[NetBoxObjectType, ...] = (
         identity_keys=("virtual_machine", "name"),
         icon="ethernet-port",
         columns=("name", "virtual_machine", "enabled", "mtu"),
-        search_fields=("name", "description", "mac_address"),
+        search_fields=("name", "description", "mac_address", "primary_mac_address"),
         attributes={
             "name": _text("name", nullable=False),
             "virtual_machine": _text("virtual_machine.name"),
