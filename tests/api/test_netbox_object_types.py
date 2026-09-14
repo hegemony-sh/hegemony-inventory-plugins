@@ -153,15 +153,10 @@ def test_every_catalogue_entry_is_well_formed(entry: catalogue.NetBoxObjectType)
     assert set(mapping.field_map) == set(entry.attributes)
 
 
-def test_catalogue_ids_are_unique_and_an_unset_config_offers_them_all() -> None:
+def test_catalogue_ids_are_unique() -> None:
     ids = [entry.id for entry in catalogue.OBJECT_TYPES]
     assert len(ids) == len(set(ids)), "duplicate ids would collide in the platform registry"
     assert tuple(sorted(ids)) == catalogue.ALL_OBJECT_TYPE_IDS
-    # The config is a ceiling, and an unset ceiling stops nothing: what a provider
-    # actually reads is the platform's own object-type selection, which cannot widen
-    # past what the provider declares it serves.
-    assert catalogue.resolve_object_type_ids(None) == catalogue.ALL_OBJECT_TYPE_IDS
-    assert catalogue.resolve_object_type_ids([catalogue.WILDCARD]) == catalogue.ALL_OBJECT_TYPE_IDS
 
 
 def test_every_family_is_grouped_under_its_netbox_app() -> None:
@@ -201,23 +196,28 @@ def test_register_declares_every_catalogue_family() -> None:
     assert "object_types" not in provider_type["default_config"]
 
 
-def test_a_provider_reads_only_the_families_its_config_names() -> None:
+def test_a_provider_offers_every_family_whatever_its_config_says() -> None:
+    """One control decides what syncs, and it is not this one.
+
+    A config that could also narrow the space is exactly what made a ticked object
+    type sync nothing: the platform can only subtract from what a provider declares.
+    A stored ``object_types`` from when this plugin had that setting is ignored rather
+    than rejected, so a provider configured then still validates.
+    """
     every = _CORE_RESOURCES | set(catalogue.ALL_OBJECT_TYPE_IDS)
     assert _object_types(_provider()) == every
-    assert _object_types(_provider({"object_types": [catalogue.WILDCARD]})) == every
-    scoped = _provider({"object_types": ["interface", "rack"]})
-    assert _object_types(scoped) == _CORE_RESOURCES | {"interface", "rack"}
-    # Devices and sites are never deselectable: they are the platform's own tables.
-    assert _object_types(_provider({"object_types": []})) == _CORE_RESOURCES
+    assert _object_types(_provider({"object_types": ["interface", "rack"]})) == every
+    assert _object_types(_provider({"object_types": []})) == every
+    assert "object_types" not in _provider({"object_types": ["rack"]}).config.model_dump()
 
 
 @pytest.mark.asyncio
-async def test_a_family_the_config_excludes_is_not_served(
+async def test_a_family_the_catalogue_does_not_know_is_not_served(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Not reading a family means refusing it, not silently returning nothing.
+    """An id nothing catalogues is refused, not silently answered with nothing.
 
-    The platform skips what a provider does not declare, so this only bites a direct
+    The platform only asks for types the provider declares, so this bites a direct
     caller -- and for that caller "not supported" is the honest answer.
     """
     requested: list[str] = []
@@ -227,14 +227,14 @@ async def test_a_family_the_config_excludes_is_not_served(
         return httpx.Response(200, json={"results": [], "next": None})
 
     _install_transport(monkeypatch, handler)
-    provider = _provider({"object_types": ["rack"]})
+    provider = _provider()
 
     with pytest.raises(InventoryProviderError) as excinfo:
-        await provider.list_objects("interface", context=_context("list_objects:interface"))
+        await provider.list_objects("unicorn", context=_context("list_objects:unicorn"))
     assert "not supported" in excinfo.value.envelope.message
     with pytest.raises(InventoryProviderError):
-        await provider.get_object("interface", "1", context=_context("get_object:interface"))
-    assert requested == [], "an excluded family must not reach NetBox at all"
+        await provider.get_object("unicorn", "1", context=_context("get_object:unicorn"))
+    assert requested == [], "an uncatalogued family must not reach NetBox at all"
 
 
 _INTERFACE_PAYLOAD = {
@@ -346,7 +346,7 @@ async def test_get_object_reads_one_object_of_a_catalogue_family(
         return httpx.Response(200, json=_INTERFACE_PAYLOAD)
 
     _install_transport(monkeypatch, handler)
-    provider = _provider({"object_types": [catalogue.WILDCARD]})
+    provider = _provider()
 
     interface = await provider.get_object("interface", "41", context=_context("get_object"))
 
@@ -489,27 +489,26 @@ def test_the_legacy_spelling_still_resolves_on_an_older_netbox() -> None:
     ] == [("site", "ams01")]
 
 
-def test_the_config_rejects_families_nothing_serves_and_keeps_the_wildcard() -> None:
+def test_the_config_rejects_families_nothing_serves_and_forgets_the_retired_setting() -> None:
     base = {"url": "https://netbox.example", "token_ref": "vault://netbox/token"}
-
-    with pytest.raises(ValidationError) as excinfo:
-        NetBoxProviderConfig.model_validate({**base, "object_types": ["interfaces", "rack"]})
-    message = str(excinfo.value)
-    assert "interfaces" in message  # the typo is named...
-    assert "interface" in message  # ...and the valid ids are listed
 
     with pytest.raises(ValidationError) as query_error:
         NetBoxProviderConfig.model_validate({**base, "object_queries": {"nope": "x=1"}})
-    assert "nope" in str(query_error.value)
+    message = str(query_error.value)
+    assert "nope" in message  # the typo is named...
+    assert "interface" in message  # ...and the valid ids are listed
 
-    # The wildcard is stored as written, so a later plugin version that adds a family
-    # starts reading it without anyone editing the provider.
-    wildcard = NetBoxProviderConfig.model_validate({**base, "object_types": ["*"]})
-    assert wildcard.object_types == ["*"]
-    assert wildcard.model_dump(mode="json")["object_types"] == ["*"]
-    assert len(wildcard.enabled_object_types) == len(catalogue.ALL_OBJECT_TYPE_IDS)
+    # A config written while this plugin still had its own object-type setting must
+    # keep validating: extra="forbid" would otherwise reject it outright.
+    for retired in (["interfaces", "rack"], ["*"], [], None):
+        config = NetBoxProviderConfig.model_validate({**base, "object_types": retired})
+        assert "object_types" not in config.model_dump(mode="json")
 
-    # A comma-separated string is accepted the way auth_fallback_schemes is.
-    assert NetBoxProviderConfig.model_validate(
+    # Including the comma-separated spelling it used to accept.
+    assert "object_types" not in NetBoxProviderConfig.model_validate(
         {**base, "object_types": "rack, cable"}
-    ).enabled_object_types == ("cable", "rack")
+    ).model_dump(mode="json")
+
+    # An unknown key that was never ours is still an error.
+    with pytest.raises(ValidationError):
+        NetBoxProviderConfig.model_validate({**base, "nonsense": 1})

@@ -14,11 +14,10 @@ one entry in :data:`OBJECT_TYPES` and nothing else.
 Reading everything NetBox holds is rarely what an operator wants: an interface table is
 two orders of magnitude larger than a device table, and a rack elevation is not worth
 syncing to drive a change. That choice belongs to the platform, which asks for it on the
-provider's own form and then asks this provider only for the families it wants: the
-catalogue is the *space* of what can be read, and every family in it is offered. The
-config's ``object_types`` can narrow that space further -- a provider that must never
-read NetBox's interface table whatever an operator ticks -- but it is not where the
-everyday choice is made, and leaving it unset offers everything.
+provider's own form and then asks this provider only for the families it wants. So the
+catalogue is the *space* of what can be read and every family in it is offered, with no
+second say here: a config that could also narrow the space is how a ticked object type
+came to sync nothing at all.
 
 Field paths are dotted (``status.value`` reads NetBox's rendered choice object). A path
 that a NetBox version does not serve yields ``None`` rather than an error, which is how
@@ -40,9 +39,6 @@ from hegemony_inventory_sdk import (
     RelationshipMapping,
     ResourceType,
 )
-
-#: Stands for "every family in the catalogue" in a provider's ``object_types``.
-WILDCARD = "*"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1385,31 +1381,6 @@ BY_ID: Mapping[str, NetBoxObjectType] = {entry.id: entry for entry in OBJECT_TYP
 
 #: Every catalogue id, sorted, for error messages and documentation.
 ALL_OBJECT_TYPE_IDS: tuple[str, ...] = tuple(sorted(BY_ID))
-
-
-def resolve_object_type_ids(selection: Iterable[str] | None) -> tuple[str, ...]:
-    """Normalize a configured ``object_types`` selection to catalogue ids.
-
-    ``None`` means every family in the catalogue, as does :data:`WILDCARD` anywhere in
-    the list: this config narrows the space the platform may choose from, and an
-    unset narrowing narrows nothing. Entries are stripped, deduplicated and sorted.
-
-    Raises:
-        ValueError: When an entry names no catalogue family, listing the valid ids.
-    """
-    if selection is None:
-        return ALL_OBJECT_TYPE_IDS
-    wanted = {str(entry).strip() for entry in selection}
-    wanted.discard("")
-    if WILDCARD in wanted:
-        return ALL_OBJECT_TYPE_IDS
-    unknown = sorted(entry for entry in wanted if entry not in BY_ID)
-    if unknown:
-        raise ValueError(
-            f"unknown NetBox object type(s): {', '.join(unknown)}. "
-            f"Valid ids are: {', '.join(ALL_OBJECT_TYPE_IDS)} (or '{WILDCARD}' for all)"
-        )
-    return tuple(sorted(wanted))
 
 
 def object_type_specs() -> tuple[ObjectTypeSpec, ...]:

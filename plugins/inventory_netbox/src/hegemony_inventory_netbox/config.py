@@ -8,16 +8,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 from hegemony_inventory_sdk import MaintenanceState
 
-from .object_types import (
-    ALL_OBJECT_TYPE_IDS,
-    BY_ID,
-    WILDCARD,
-    resolve_object_type_ids,
-)
+from .object_types import ALL_OBJECT_TYPE_IDS, BY_ID
 
 # NetBox device statuses -> the platform's MaintenanceState. "Gone or going" is
 # disabled; "not yet in service" is maintenance. Anything unlisted (including
@@ -126,20 +121,6 @@ class NetBoxProviderConfig(BaseModel):
     )
     field_map: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_FIELD_MAP))
     default_access_config: dict[str, Any] = Field(default_factory=dict)
-    object_types: list[str] | None = Field(
-        None,
-        description=(
-            "A ceiling on which NetBox object families this provider may read, beyond "
-            "devices and sites (which are always read). Leave it unset: the platform's "
-            "own object-type selection on this provider is where the everyday choice "
-            "is made, and an unset ceiling offers it every family the plugin knows, "
-            "including ones a later version adds. Set it only to put a family out of "
-            "reach whatever is selected there, e.g. ['interface', 'vlan', "
-            f"'virtual_machine'] (['{WILDCARD}'] means every family, the same as unset). "
-            "Valid ids: "
-            f"{', '.join(ALL_OBJECT_TYPE_IDS)}."
-        ),
-    )
     object_queries: dict[str, str] = Field(
         default_factory=dict,
         description=(
@@ -197,29 +178,21 @@ class NetBoxProviderConfig(BaseModel):
             return ""
         return str(value).strip()
 
-    @field_validator("object_types", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def normalize_object_types(cls, value: Any) -> list[str] | None:
-        """Accept a list or a comma-separated string; reject ids nothing serves.
+    def drop_retired_object_types(cls, value: Any) -> Any:
+        """Ignore a stored ``object_types``, which briefly duplicated a platform control.
 
-        The selection is stored as written rather than expanded, so a provider
-        configured with the wildcard keeps reading everything the plugin knows after an
-        upgrade adds a family.
+        This config once carried a ceiling on which families the provider could read.
+        The platform asks the same question on the provider form, and two controls for
+        one choice is how a ticked object type came to sync nothing, so the ceiling is
+        gone. A config written while it existed still has to validate: ``extra="forbid"``
+        would otherwise reject it outright rather than ignore a key that no longer means
+        anything.
         """
-        if value is None:
-            return None
-        if isinstance(value, str):
-            candidates = [item.strip() for item in value.split(",")]
-        elif isinstance(value, (list, tuple, set)):
-            candidates = [str(item).strip() for item in value]
-        else:
-            raise ValueError("object_types must be a list or comma-separated string")
-        wanted = {item for item in candidates if item}
-        if WILDCARD in wanted:
-            return [WILDCARD]
-        # Raises ValueError naming the unknown ids and listing the valid ones.
-        resolve_object_type_ids(wanted)
-        return sorted(wanted)
+        if isinstance(value, dict) and "object_types" in value:
+            value = {key: item for key, item in value.items() if key != "object_types"}
+        return value
 
     @field_validator("object_queries")
     @classmethod
@@ -279,11 +252,6 @@ class NetBoxProviderConfig(BaseModel):
             if stripped_key and stripped_path:
                 normalized[stripped_key] = stripped_path
         return normalized
-
-    @property
-    def enabled_object_types(self) -> tuple[str, ...]:
-        """The object families this provider reads, resolved from the selection."""
-        return resolve_object_type_ids(self.object_types)
 
     def safe_config(self) -> dict[str, Any]:
         return self.model_dump(mode="json")

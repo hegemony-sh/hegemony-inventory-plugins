@@ -40,7 +40,6 @@ rendered automatically and `token_ref` gets a secret picker.
 | `status_map` | no | built-in | Maps a NetBox device status slug to a maintenance state (`active`, `maintenance`, `disabled`) |
 | `field_map` | no | built-in | Maps normalized inventory fields → NetBox REST payload paths, including optional `access_config.*` refs under `custom_fields` |
 | `default_access_config` | no | `{}` | Access-config defaults applied to every device |
-| `object_types` | no | `null` | A ceiling on which NetBox families this provider may read beyond devices and sites. `null` (or `["*"]`) = every family; list ids to put the rest out of reach. Normally left unset — the platform's own selection is the control. See [Object types](#object-types) |
 | `object_queries` | no | `{}` | Per-family NetBox filter, e.g. `{"interface": "mgmt_only=false"}` — `device_query` for everything that is not a device |
 | `query_cache_ttl_seconds` | no | `null` | Optional query cache TTL (0–86400 s) |
 | `timeout_seconds` | no | `10` | Per-request timeout |
@@ -216,30 +215,21 @@ device table, and a rack elevation is not worth a sync.
 
 ### Choosing what to read
 
-**The choice is made in Hegemony, not here.** Every family in the catalogue is declared
-as a supported resource, so the provider's *Object types to sync* selection in the
-provider form offers all of them, and a provider reads the ones ticked there. A family
-that is not ticked is not requested at all, and rows an earlier sync stored for it are
-marked **stale** on the next sync rather than left looking current.
+**The choice is made in Hegemony, not here — and there is no setting for it in this
+config.** Every family in the catalogue is declared as a supported resource, so the
+provider's *Object types to sync* selection in the provider form offers all of them, and
+a provider reads the ones ticked there. A family that is not ticked is not requested at
+all, and rows an earlier sync stored for it are marked **stale** on the next sync rather
+than left looking current.
 
-`object_types` is a *ceiling* above that selection, for the rare case where a family must
-be out of reach whatever anyone ticks — a read-only token that must never touch the
-interface table, say:
+This plugin briefly carried its own `object_types` setting as a second, narrower say. It
+is gone: the platform can only subtract from what a provider declares it serves, so the
+two controls could disagree, and when they did the quieter one won — ticking **Racks**
+synced no racks and the form gave no hint why. A config still carrying the key validates
+and the key is ignored, so a provider configured while it existed needs no edit.
 
-```json
-{ "object_types": ["interface", "vlan", "virtual_machine", "circuit"] }
-```
-
-- Omit it, or leave it `null`, for no ceiling: every family the plugin knows is offered.
-- `["*"]` is the same as unset, and stays true of families a later plugin version adds,
-  because the wildcard is stored as written rather than expanded.
-- `[]` allows devices and sites only.
-- A comma-separated string works too (`"rack, cable"`), and an id nothing serves is
-  rejected by name, with the valid ids listed.
-
-A family has to be under the ceiling **and** selected in the provider form to be read, so
-a narrowed ceiling makes the ticked-but-unreachable families in that form a lie. Leave it
-unset unless you mean it.
+Which families are worth reading is still a real question — an interface table is two
+orders of magnitude larger than a device table — but it is asked once, in the form.
 
 ### Scoping each family
 
@@ -248,7 +238,6 @@ applied to every read of it:
 
 ```json
 {
-  "object_types": ["interface", "ip_address"],
   "object_queries": {
     "interface": "mgmt_only=false&enabled=true",
     "ip_address": "status=active"

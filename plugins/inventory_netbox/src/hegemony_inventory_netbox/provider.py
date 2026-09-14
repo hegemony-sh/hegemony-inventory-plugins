@@ -121,9 +121,11 @@ _SITE_TREE_SOURCES: dict[str, tuple[str, str, str, str]] = {
 class NetBoxInventoryProvider(InventoryProvider):
     provider_type = "netbox"
     capabilities = frozenset({Capability.READ, Capability.QUERY})
-    # The class declares the whole catalogue, which is what the provider *type* can
-    # serve and what the platform offers an operator to choose from. An instance
-    # narrows it below to what its config actually reads.
+    # Every family in the catalogue, plus devices and sites. This is the whole space
+    # the provider can read, and it is deliberately not narrowed per instance: which
+    # of them a given provider actually syncs is the platform's own object-type
+    # selection, and a second narrowing here is what once made a ticked type sync
+    # nothing at all.
     supported_resources = frozenset(
         {ResourceType.DEVICE.value, ResourceType.SITE.value, *ALL_OBJECT_TYPE_IDS}
     )
@@ -135,17 +137,7 @@ class NetBoxInventoryProvider(InventoryProvider):
         self.id = provider_id
         self.config = NetBoxProviderConfig.model_validate(config or {})
         self._services = services
-        # What THIS provider reads: the configured families, plus devices and sites,
-        # which are read unconditionally. Shadowing the class attribute is what tells
-        # the platform to skip the rest -- nothing is fetched for a family that is not
-        # declared, and rows an earlier sync stored for one read stale rather than
-        # staying active for ever.
-        self._object_sources: dict[str, NetBoxObjectType] = sources_for(
-            self.config.enabled_object_types
-        )
-        self.supported_resources = frozenset(
-            {ResourceType.DEVICE.value, ResourceType.SITE.value, *self._object_sources}
-        )
+        self._object_sources: dict[str, NetBoxObjectType] = sources_for(ALL_OBJECT_TYPE_IDS)
 
     async def list(
         self,

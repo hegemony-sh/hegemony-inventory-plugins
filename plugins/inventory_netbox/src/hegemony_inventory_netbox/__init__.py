@@ -29,9 +29,9 @@ def register(registry: InventoryPluginRegistry) -> None:
 
     Every family in ``object_types.OBJECT_TYPES`` is registered, which is what makes it
     selectable and renderable, and every one is declared as a supported resource, which
-    is what lets the platform's own object-type selection reach it. A provider reads the
-    families that selection names; its ``object_types`` config is a ceiling above it,
-    unset by default, not a second place the everyday choice is made.
+    is what lets the platform's own object-type selection reach it. That selection is
+    the only say in what a provider reads: this plugin deliberately keeps no setting of
+    its own for the same question.
     """
     for spec in object_type_specs():
         registry.register_object_type(spec)
