@@ -421,6 +421,30 @@ is right about the release in front of it rather than the release someone had in
 a recorded NetBox 4.3 schema by `scripts/generate_catalogue.py` and checked in. What is
 still written by hand is `overlay.py` and nothing else.
 
+### Why a checked-in catalogue exists at all
+
+The obvious question, given that the provider can derive a catalogue from a live
+instance: why ship one?
+
+Because deriving needs three things the plugin does not always have — a configured
+provider, network reach to it, and someone to have asked. The catalogue is what the
+plugin offers before any of those:
+
+- **Registration happens at import.** The `hegemony.inventory_plugins` entry point
+  registers every object type when the plugin loads, long before a provider exists or a
+  database is reachable. A catalogue fetched over HTTP could not be there in time.
+- **Discovery is per provider and opt-in.** It runs when an operator presses *Discover*,
+  and what it finds is stored against that one provider. A fresh install has none, and
+  the provider form still has to offer something to tick.
+- **A live NetBox may be unreachable.** The catalogue is also the fallback when discovery
+  has never succeeded — an expired token or a proxy that strips `/api/schema/` should
+  degrade to "the families NetBox generally has", not to nothing.
+
+So the two are a seed and an answer, not two copies of one thing. A provider that has
+described itself uses what *its* instance said; everything else uses the seed. The seed
+being generated rather than typed is what keeps them consistent: both come out of the
+same deriver.
+
 ### Why it is generated rather than checked
 
 The deriver began as a way to *check* a hand-written catalogue: derive from a recorded
@@ -457,9 +481,9 @@ the catalogue declared it a string.
 
 | | Hand-written | Generated |
 |---|---|---|
-| Families | 50 | **102** |
-| Attributes | 328 | **1256** |
-| Relationships | 51 | **193** |
+| Families | 50 | **104** |
+| Attributes | 328 | **1310** |
+| Relationships | 51 | **211** |
 | Attributes carrying an exact choice set | 0 | **hundreds** |
 
 Every family the hand-written catalogue offered is still offered, under the same id.
