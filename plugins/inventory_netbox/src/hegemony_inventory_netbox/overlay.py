@@ -299,6 +299,11 @@ BINDINGS: Mapping[str, ProjectionBinding] = MappingProxyType(
                 "enable.password_ref": "custom_fields.hegemony_enable_password_ref",
             },
             tags={"role": "role"},
+            # NetBox states a primary address as 10.0.0.1/24, which is the truth about
+            # the interface and useless to a transport. The stored object keeps it;
+            # the device column gets the host. Declared here because which of the two a
+            # column needs is this provider's knowledge, not the platform's.
+            transforms={"hostname": ["host"]},
         ),
         "/api/dcim/sites/": ProjectionBinding(
             target="site",

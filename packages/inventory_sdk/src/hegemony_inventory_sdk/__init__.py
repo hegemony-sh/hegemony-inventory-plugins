@@ -25,7 +25,7 @@ from .descriptors import (
     device_to_object_descriptor,
     site_to_object_descriptor,
 )
-from .discovery import DiscoveryResult, ProjectionBinding
+from .discovery import TRANSFORMABLE_FIELDS, DiscoveryResult, ProjectionBinding
 from .enums import Capability, MaintenanceState, ProviderErrorCode, ResourceType
 from .errors import InventoryProviderError, ProviderErrorEnvelope, not_supported
 from .mapping import (
@@ -44,8 +44,13 @@ from .provider import InventoryProvider
 from .registry import InventoryPluginRegistry, ProviderFactory
 from .secrets import SecretRef, SecretResolver
 from .services import GitFetcher, GitWorkdir, InventoryLimits, PlatformServices
+from .transforms import TRANSFORMS, apply_transforms, normalize_transforms
 
 __all__ = [
+    "normalize_transforms",
+    "apply_transforms",
+    "TRANSFORMS",
+    "TRANSFORMABLE_FIELDS",
     "DEFAULT_DEVICE_MGMT_PORT",
     "DEFAULT_DEVICE_PLATFORM",
     "SDK_ABI_VERSION",

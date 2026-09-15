@@ -18,14 +18,26 @@ This lives apart from :mod:`.descriptors` because it joins the two halves of a p
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from .mapping import ObjectFieldMapping
 from .objecttype import ObjectTypeSpec
+from .transforms import normalize_transforms
 
-__all__ = ["DiscoveryResult", "ProjectionBinding"]
+__all__ = ["TRANSFORMABLE_FIELDS", "DiscoveryResult", "ProjectionBinding"]
+
+
+#: The binding fields a transform may be declared against.
+#:
+#: Every one names a single scalar the platform writes into a device or site column.
+#: The edges are absent on purpose: an edge's value is an external id, and an id the
+#: platform altered on the way past would no longer resolve to the row it was stored
+#: under -- which is the exact class of defect projection exists to remove.
+TRANSFORMABLE_FIELDS = frozenset(
+    {"name", "hostname", "vendor", "model", "platform", "serial", "maintenance_state"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +119,29 @@ class ProjectionBinding:
     #: named ``role`` would otherwise overwrite the mapped role. An empty prefix is
     #: allowed and means the operator has accepted that.
     tag_prefix: str = ""
+    #: Named conversions to apply to a projected value, by the binding field producing it.
+    #:
+    #: Keyed by the name of the field on this binding -- ``"hostname"``, ``"vendor"`` --
+    #: rather than by the attribute path, because the same stored attribute can feed two
+    #: fields that want it differently, and because a path is the provider's business
+    #: while this says what the *platform column* needs.
+    #:
+    #: This is what keeps the stored object and the projected row from having to agree.
+    #: A NetBox interface address is genuinely ``10.0.0.1/24`` and the object page should
+    #: show that; a device's management address has to be something a transport can
+    #: dial. One read, two truthful answers, and the difference declared here rather than
+    #: hard-coded in whichever consumer noticed first.
+    #:
+    #: Values are transform names from :data:`~.transforms.TRANSFORMS`, applied in the
+    #: order written, and are always a list even for a single name -- a bare string is
+    #: refused because ``str`` is itself a sequence of strings and would otherwise be
+    #: read one character at a time. A name this platform does not know raises at
+    #: construction, which surfaces as a failed discovery naming the field; see that
+    #: module for why silence would be worse.
+    #:
+    #: Normalised to tuples on construction, so a binding restored from JSON -- where a
+    #: tuple can only come back as a list -- compares equal to the one that was stored.
+    transforms: Mapping[str, Sequence[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.target not in ("device", "site"):
@@ -121,6 +156,22 @@ class ProjectionBinding:
             # A prefix with nothing to prefix is a mapping that does not do what its
             # author thinks it does, which is worth failing rather than ignoring.
             raise ValueError("ProjectionBinding: tag_prefix is set but tag_list is not")
+        if self.transforms:
+            unknown_fields = sorted(set(self.transforms) - TRANSFORMABLE_FIELDS)
+            if unknown_fields:
+                # A transform on a field that produces no value is a declaration that
+                # can never run. Naming the field it should have been on is the whole
+                # help available here, so the error carries the set.
+                raise ValueError(
+                    f"ProjectionBinding: transforms name no projected field: "
+                    f"{', '.join(unknown_fields)}; "
+                    f"projected fields are: {', '.join(sorted(TRANSFORMABLE_FIELDS))}"
+                )
+            object.__setattr__(
+                self,
+                "transforms",
+                normalize_transforms(self.transforms, where="ProjectionBinding.transforms"),
+            )
 
 
 @dataclass(frozen=True, slots=True)
