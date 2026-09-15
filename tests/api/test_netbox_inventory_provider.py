@@ -20,6 +20,7 @@ from hegemony_inventory_netbox.object_types import BY_ID
 from hegemony_inventory_netbox.provider import NetBoxInventoryProvider
 from hegemony_inventory_sdk import (
     Capability,
+    InventoryLimits,
     InventoryProviderError,
     MaintenanceState,
     ObjectFieldMapping,
@@ -1661,8 +1662,9 @@ async def test_discovery_extends_the_registered_catalogue_rather_than_shadowing_
     discovered = {spec.id for spec in result.object_types}
     assert {entry.id for entry in catalogue.OBJECT_TYPES} <= discovered
     assert "dcim.interfaces" not in discovered
-    # Devices and sites are read through the platform's own contract, so offering them
-    # again as generic objects would store every device twice.
+    # Devices and sites are families like any other now, but under the ids this plugin
+    # registers: the derived spelling would strand every row already stored.
+    assert {"device", "site"} <= discovered
     assert "dcim.devices" not in discovered
     assert "dcim.sites" not in discovered
     # ...but an interface still reaches its device.
@@ -1694,6 +1696,90 @@ async def test_every_discovered_type_carries_the_mapping_to_read_it_with(
 
     assert {spec.id for spec in result.object_types} == set(result.mappings)
     assert result.mappings["interface"].object_type == "interface"
+
+
+@pytest.mark.asyncio
+async def test_discovery_reads_every_custom_field_rather_than_a_preview_of_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom field past the preview cap is an attribute the catalogue would never name.
+
+    Custom fields are read to *derive* from, not to show: each one becomes an attribute
+    on every family it applies to. Stopping at the preview cap would leave the instance
+    describing itself as though the fields past it were not defined -- and nothing
+    downstream could tell that from an instance where they really are not. So this read
+    is bounded by the page limit, which raises, rather than by a cap that truncates.
+    """
+    pages = [
+        {
+            "results": [{"name": name, "type": {"value": "text"}, "object_types": ["dcim.device"]}],
+            "next": next_url,
+        }
+        for name, next_url in (
+            ("first", "https://netbox.example/api/extras/custom-fields/?page=2"),
+            ("second", "https://netbox.example/api/extras/custom-fields/?page=3"),
+            ("third", None),
+        )
+    ]
+    document = json.loads(_SCHEMA_FIXTURE.read_text())
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/schema/":
+            return httpx.Response(200, json=document)
+        page = int(request.url.params.get("page", 1))
+        return httpx.Response(200, json=pages[page - 1])
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+    # One page's worth: under a preview cap the last two fields would never be fetched.
+    provider._services.limits = InventoryLimits(
+        max_provider_pages=100, max_run_targets=1000, max_preview_devices=1
+    )
+
+    result = await provider.discover(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="discover",
+            query_hash="discover",
+            config_version=1,
+        )
+    )
+
+    device = next(spec for spec in result.object_types if spec.id == "device")
+    properties = set(device.field_schema["properties"])
+    assert {"custom_field_first", "custom_field_second", "custom_field_third"} <= properties
+
+
+@pytest.mark.asyncio
+async def test_custom_fields_that_were_read_successfully_are_not_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``warnings`` says what could not be interpreted, not what went well.
+
+    An operator reading a discovery result should be able to treat a non-empty
+    ``warnings`` as "something here needs looking at". Counting a successful read into it
+    puts every well-configured instance permanently in that state.
+    """
+    handler, _requested = _discovery_handler(
+        custom_fields=[
+            {"name": "hegemony_ssh_ref", "type": {"value": "text"}, "object_types": ["dcim.device"]}
+        ]
+    )
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _provider(token="netbox-token").discover(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="discover",
+            query_hash="discover",
+            config_version=1,
+        )
+    )
+
+    device = next(spec for spec in result.object_types if spec.id == "device")
+    # The field was read -- this is not "discovery found nothing to warn about".
+    assert "custom_field_hegemony_ssh_ref" in device.field_schema["properties"]
+    assert result.warnings == ()
 
 
 @pytest.mark.asyncio
@@ -1790,6 +1876,70 @@ async def test_netbox_reads_a_family_only_the_instance_knows_about(
         "type": "A",
         "value": "10.0.0.8",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_catalogue_family_gains_the_custom_fields_only_this_instance_defines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The instance's half of a family the plugin already knows.
+
+    ``interface`` is in the shipped catalogue, so the endpoint, the key and the paths all
+    come from there. But a custom field is defined on one NetBox and not the next, and
+    discovery advertises it: the platform merges it into the object type it publishes, so
+    a browse page offers the column. If the read ignored it, that column would be empty
+    for every row on every instance -- an attribute promised and never delivered.
+    """
+    paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(str(request.url.path))
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": 7,
+                        "name": "et-0/0/0",
+                        "custom_fields": {"optic_serial": "OPT-991"},
+                    }
+                ],
+                "next": None,
+            },
+        )
+
+    provider = _provider(token="netbox-token")
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    shipped = BY_ID["interface"].mapping
+    discovered = ObjectFieldMapping(
+        object_type="interface",
+        identity="id",
+        name_field="name",
+        field_map={
+            **shipped.field_map,
+            "custom_field_optic_serial": "custom_fields.optic_serial",
+            # A path the instance disagrees with the plugin about. The overlay's
+            # judgement is the plugin's to keep; discovery adds, it does not overwrite.
+            "name": "display",
+        },
+        source={"endpoint": "/api/plugins/wrong/"},
+    )
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="auto_sync_objects:interface",
+            object_mapping=discovered,
+        ),
+    )
+
+    # Read from the catalogue's endpoint, not the discovered mapping's.
+    assert paths == [BY_ID["interface"].endpoint]
+    (record,) = objects
+    assert record.attributes["custom_field_optic_serial"] == "OPT-991"
+    # The plugin's path for a field both describe still wins.
+    assert record.attributes["name"] == "et-0/0/0"
 
 
 @pytest.mark.asyncio

@@ -150,6 +150,9 @@ key, so the NetBox site hierarchy survives the round trip.
 
 NetBox tags are flat slugs, but devices are filtered on a `key=value` map
 (`tags[role]=core` in device search, `tag.*` in run forms). Each NetBox tag is surfaced
+as `<tag_key_prefix><slug> = "true"` — the tag `core` becomes `tags["tag:core"]`. The
+prefix keeps a NetBox tag named `role` from colliding with the mapped device role. The
+raw slugs remain available unprefixed as `native_tags`.
 ## The site tree
 
 NetBox keeps **two** independent nested hierarchies above a site — **Region**
@@ -189,9 +192,6 @@ not part of the tree. They arrive as a device attribute (`location`) instead,
 because making them sites would move every device that has one a level down and
 silently break any selector pinned to a site.
 
-as `<tag_key_prefix><slug> = "true"` — the tag `core` becomes `tags["tag:core"]`. The
-prefix keeps a NetBox tag named `role` from colliding with the mapped device role. The
-raw slugs remain available unprefixed as `native_tags`.
 
 ### Access config
 
@@ -207,8 +207,9 @@ it reads for a given provider is that provider's choice, because reading everyth
 rarely what anyone wants: an interface table is two orders of magnitude larger than a
 device table, and a rack elevation is not worth a sync.
 
-- `device`, `site` — always read. Devices and sites are the platform's own tables, with
-  their own columns, targeting and site tree.
+- `device`, `site` — always read. They are families in the catalogue like anything else,
+  and the platform's devices and sites tables are *written from* the rows they store
+  rather than fetched a second time. See [Devices and sites](#devices-and-sites).
 - Everything else is a **family** in the catalogue
   (`src/hegemony_inventory_netbox/object_types.py`), materialized into the generic
   inventory-object store with schema-driven list and detail pages, free-text search and
@@ -287,11 +288,52 @@ itself, so it cannot drift from what the plugin actually offers.
 `circuit_provider` is NetBox's *Provider* model — a carrier. It is not called `provider`
 because an inventory provider is something else entirely here.
 
-Deliberately absent: **regions and site groups**, which this provider already projects
-onto the platform's site tree and would otherwise exist twice; **device and module bays**
-and **cable terminations**, which are structural placeholders rather than things anyone
-targets; and NetBox's own plumbing — webhooks, scripts, jobs, object changes — which is
-not inventory.
+**Regions and site groups** are in the catalogue, and so are **devices and sites**.
+They used to be left out, because the provider listed them separately and offering them
+again as objects would have stored each one twice. They are read once now, as families
+like any other, and the platform's devices and sites tables are written from the rows
+that read stored — see [Devices and sites](#devices-and-sites).
+
+Deliberately absent: **device and module bays** and **cable terminations**, which are
+structural placeholders rather than things anyone targets; and NetBox's own plumbing —
+webhooks, scripts, jobs, object changes — which is not inventory.
+
+### Devices and sites
+
+A NetBox device used to arrive twice: once through `query_devices`, with its site nested
+inside it and keyed by slug, and once as part of the `/api/dcim/sites/` listing, keyed by
+the numeric id. Both were stored, so one NetBox site became two platform rows — and the
+devices attached to the one with no parent link, which quietly disconnected the site tree
+from the devices hanging off it. Two reads, two keys, and nobody's job to keep them
+agreeing.
+
+There is one read now. `device`, `site` and `region` are families, synced into the object
+store like `interface` or `vlan`, and each carries a **projection binding** saying what
+the platform should write from those rows:
+
+| Family | Written to | Notes |
+|---|---|---|
+| `device` | `devices` | name, management address, vendor, model, platform, serial, secret refs, and the NetBox status mapped onto `maintenance_state` |
+| `site` | `sites` | keyed on the slug, parented by its `region` edge |
+| `region` | `sites` | keyed `region:<id>`, parented by its own `parent` edge |
+
+Three things follow, and each is a behaviour rather than an implementation detail:
+
+- **A site exists once.** A device reaches its site through an edge citing the same
+  external id the site row is stored under, so there is one key and one row.
+- **The hierarchy is real.** A region node is the projection of a stored region, not a
+  synthetic site invented to give the tree something to hang from. The `region:` prefix
+  is what keeps a region and a site of the same slug apart, since NetBox slugs are unique
+  per model rather than globally.
+- **Staleness follows the object.** A projected row is written from an active object, so
+  the pass that marks an object stale is the pass that stops projecting it.
+
+An operator's local columns — `maintenance_state_override`, `tags_local`, the device
+overlay — are never written here. Projection owns the provider-sourced columns and
+nothing else, exactly as the old device path did.
+
+A provider that has never been asked to describe itself has no bindings, and answers for
+its devices and sites the way it always did. Projection starts at the first discovery.
 
 ### Relationships
 
@@ -555,10 +597,16 @@ interface discovered on a live instance still points at `device`. Without that r
 instance would offer two object types for every family, and every row already synced
 under the registered id would be stranded.
 
-Devices and sites are left out entirely: the platform reads those through its own
-device and site contract, and offering them again as generic objects would store every
-device twice. They remain relationship *targets*, which is how a discovered interface
-still reaches its device.
+Devices and sites come back like any other family, each with a **projection binding**
+saying which platform table it is written to and which attribute fills which column.
+They used to be left out, because the platform fetched them separately and offering them
+again would have stored every device twice. One read and one key is what removes that,
+not a rule about which families may be described — see [Devices and
+sites](#devices-and-sites).
+
+A binding is sent only for a family this instance actually serves, so an instance
+without regions gets a flat site list rather than a binding that projects from rows
+which never arrive.
 
 Where the connection test's probe is best-effort, `discover()` raises. The caller asked
 for the description, and there is nothing to return in its place.
@@ -576,8 +624,9 @@ python scripts/trim_netbox_schema.py schema.json tests/fixtures/netbox-4.3-schem
 
 ### What this does not do yet
 
-The deriver does not run at sync time. The shipped catalogue is still the hand-written
-one, and the derived catalogue exists to check it. Running discovery against a live
-instance — so that a provider offers the families *its* NetBox has, plugin models and
-custom fields included — needs a per-provider object-type registry in the platform and
-is not a plugin-only change.
+The deriver does not run at sync time. A provider reads the catalogue it shipped, or
+what the platform stored when discovery last ran — never a schema fetched during the
+sync itself, which would put a multi-megabyte read in front of every pass.
+
+Nothing is written back. `discover()` describes; it does not create, update or delete
+anything in NetBox.

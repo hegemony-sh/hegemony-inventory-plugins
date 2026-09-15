@@ -129,6 +129,29 @@ _SITE_TREE_SOURCES: dict[str, tuple[str, str, str, str]] = {
 }
 
 
+def _with_discovered_paths(
+    shipped: ObjectFieldMapping, discovered: ObjectFieldMapping | None
+) -> ObjectFieldMapping:
+    """``shipped``, plus the field paths only this instance knows about.
+
+    A custom field is defined on one NetBox and not the next, and a release adds
+    properties to families the recorded schema already had. Both show up in what an
+    instance says it serves, and the platform puts them in the manifest -- so a read that
+    ignored them would offer a browse column that is empty for every row.
+
+    Only the field map is combined. Everything else on the mapping is a contract the
+    plugin owns: ``identity`` is the key rows are already stored under, and the endpoint
+    and base query are how this provider reaches the family. A discovery that disagreed
+    about those would not be adding to what the plugin knows, it would be replacing it.
+    """
+    if discovered is None or not discovered.field_map:
+        return shipped
+    field_map = {**discovered.field_map, **shipped.field_map}
+    if field_map == dict(shipped.field_map):
+        return shipped
+    return replace(shipped, field_map=field_map)
+
+
 @dataclass(frozen=True, slots=True)
 class _FetchPlan:
     """Everything needed to read one NetBox family: where it lives and how to map it.
@@ -431,13 +454,30 @@ class NetBoxInventoryProvider(InventoryProvider):
         this provider is built fresh for the call and remembers nothing, so the platform
         hands back the mapping discovery returned, endpoint and all.
 
-        ``None`` for anything neither knows: device and site, which have their own
-        contract, and a family nobody has ever described.
+        For a catalogue family the two are **combined**, because each knows something the
+        other cannot. The catalogue's paths are editorial: overlay corrections, the
+        legacy spellings a replaced field keeps, the column choice. The discovered ones
+        describe this instance: its custom fields, and whatever its release added to a
+        family the recorded schema predates. Taking only the catalogue's would advertise
+        attributes on the manifest that no read ever fills; taking only the instance's
+        would let a stale discovery overwrite the plugin's own judgement. So the
+        discovered paths fill in underneath and the catalogue wins where they disagree --
+        the same rule the platform applies when it merges the two schemas.
+
+        ``None`` for anything neither knows: a family nobody has ever described.
         """
+        mapping = context.object_mapping
+        if mapping is not None and mapping.object_type != object_type:
+            # A mapping for some other family says nothing about this one.
+            mapping = None
         source = self._object_sources.get(object_type)
         if source is not None:
-            return _FetchPlan(object_type, source.endpoint, source.mapping, source.base_query)
-        mapping = context.object_mapping
+            return _FetchPlan(
+                object_type,
+                source.endpoint,
+                _with_discovered_paths(source.mapping, mapping),
+                source.base_query,
+            )
         if mapping is None:
             return None
         endpoint = mapping.source.get("endpoint", "")
@@ -630,13 +670,15 @@ class NetBoxInventoryProvider(InventoryProvider):
 
         Families the catalogue already knows keep the ids this plugin registers, so
         discovery extends what a provider offers instead of shadowing it -- see
-        :func:`~.derive.registered_catalogue`. Devices and sites are left out because the
-        platform reads them through its own contract.
+        :func:`~.derive.registered_catalogue`. Devices and sites are in there like any
+        other family, with a binding saying which is which, because the platform writes
+        those two tables from the rows this provider stored rather than reading them a
+        second time.
 
         Unlike the connection test's best-effort probe, a failure here is raised: the
         caller asked for a description and there is none to give.
         """
-        derived, custom_fields = await self._fetch_derived(context)
+        derived, _custom_fields = await self._fetch_derived(context)
         catalogue = registered_catalogue(derived)
         return DiscoveryResult(
             source_version=derived.source_version,
@@ -647,14 +689,10 @@ class NetBoxInventoryProvider(InventoryProvider):
             # does not serve regions simply gets a flat site list rather than a binding
             # that projects from rows which never arrive.
             bindings=tuple(entry.binding for entry in catalogue if entry.binding is not None),
-            warnings=(
-                *derived.warnings,
-                *(
-                    f"{len(custom_fields)} custom fields were read from this instance"
-                    for _ in (0,)
-                    if custom_fields
-                ),
-            ),
+            # Only what the deriver could not interpret. A successful read is not a
+            # warning, however much of it there was: the count of custom fields belongs
+            # in the connection test's report, which is where it is.
+            warnings=derived.warnings,
         )
 
     async def _fetch_derived(
@@ -668,7 +706,11 @@ class NetBoxInventoryProvider(InventoryProvider):
             "/api/extras/custom-fields/",
             context,
             page_limit=self._services.limits.max_provider_pages,
-            result_limit=self._services.limits.max_preview_devices,
+            # No preview cap. A custom field this read drops is an attribute the
+            # discovered catalogue never mentions, on an instance that defines it -- and
+            # nothing downstream could tell that from an instance that does not. The
+            # page limit still bounds the read, and it fails loudly.
+            result_limit=None,
         )
         return derive_catalogue(schema, custom_fields=custom_fields), custom_fields
 
@@ -872,8 +914,16 @@ class NetBoxInventoryProvider(InventoryProvider):
         )
 
     async def _paginated(
-        self, path: str, context: ProviderCallContext, *, page_limit: int, result_limit: int
+        self, path: str, context: ProviderCallContext, *, page_limit: int, result_limit: int | None
     ) -> builtins.list[dict[str, Any]]:
+        """Every record behind ``path``, following NetBox's ``next`` links.
+
+        ``result_limit`` is a preview cap: it truncates, silently, because a preview of
+        the first N devices is the whole point of asking for one. ``None`` says this
+        caller needs the *complete* listing and would be wrong to work from part of it.
+        Such a read is still bounded -- by ``page_limit``, which raises rather than
+        returning a short answer that looks like the full one.
+        """
         items: builtins.list[dict[str, Any]] = []
         next_url: str | None = path
         pages = 0
@@ -894,7 +944,7 @@ class NetBoxInventoryProvider(InventoryProvider):
                     context.operation,
                 )
             items.extend([item for item in raw_results if isinstance(item, dict)])
-            if len(items) >= result_limit:
+            if result_limit is not None and len(items) >= result_limit:
                 return items[:result_limit]
             next_raw = page.get("next") if isinstance(page, dict) else None
             next_url = next_raw if isinstance(next_raw, str) and next_raw else None
