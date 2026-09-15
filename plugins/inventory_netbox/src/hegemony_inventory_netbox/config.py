@@ -145,6 +145,19 @@ class NetBoxProviderConfig(BaseModel):
     )
     query_cache_ttl_seconds: int | None = Field(None, ge=0, le=86400)
     timeout_seconds: float = Field(10.0, gt=0, le=120)
+    max_response_bytes: int = Field(
+        64 * 1024 * 1024,
+        ge=64 * 1024,
+        le=512 * 1024 * 1024,
+        description=(
+            "Largest response body this provider will read, in bytes. A timeout bounds "
+            "how LONG a read may take and nothing bounded how MUCH it may return, so a "
+            "single response could spend the API process's memory while never once "
+            "going quiet. The default is generous because /api/schema/ is genuinely "
+            "several megabytes; it is a ceiling on the absurd, not a budget. A body "
+            "that reaches it is abandoned unparsed."
+        ),
+    )
 
     @field_validator("token_ref")
     @classmethod

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from time import monotonic
@@ -589,38 +590,42 @@ class NetBoxInventoryProvider(InventoryProvider):
                 for auth_index, authorization in enumerate(authorization_values):
                     headers = {"Authorization": authorization} if authorization else {}
                     try:
-                        resp = await client.get(url, headers=headers)
-                        if (
-                            resp.status_code in {401, 403}
-                            and auth_index < len(authorization_values) - 1
-                        ):
-                            continue
-                        if resp.status_code in {401, 403}:
-                            raise self._error(
-                                ProviderErrorCode.AUTH_FAILED,
-                                "NetBox authentication failed",
-                                context.operation,
-                            )
-                        if resp.status_code == 404:
-                            raise self._error(
-                                ProviderErrorCode.NOT_FOUND,
-                                "NetBox resource not found",
-                                context.operation,
-                            )
-                        if resp.status_code == 429 or resp.status_code >= 500:
-                            if attempt < retry_attempts - 1:
-                                await asyncio.sleep(0.2 * (2**attempt))
-                                break
-                            raise self._error(
-                                ProviderErrorCode.UNAVAILABLE,
-                                "NetBox provider is unavailable",
-                                context.operation,
-                                retryable=True,
-                            )
-                        if 400 <= resp.status_code < 500:
-                            raise self._client_error(resp, context.operation)
+                        # Streamed rather than fetched whole: the status arrives before
+                        # the body does, so an error response is never read at all, and
+                        # a success is read under the cap in _read_capped.
+                        async with client.stream("GET", url, headers=headers) as resp:
+                            if (
+                                resp.status_code in {401, 403}
+                                and auth_index < len(authorization_values) - 1
+                            ):
+                                continue
+                            if resp.status_code in {401, 403}:
+                                raise self._error(
+                                    ProviderErrorCode.AUTH_FAILED,
+                                    "NetBox authentication failed",
+                                    context.operation,
+                                )
+                            if resp.status_code == 404:
+                                raise self._error(
+                                    ProviderErrorCode.NOT_FOUND,
+                                    "NetBox resource not found",
+                                    context.operation,
+                                )
+                            if resp.status_code == 429 or resp.status_code >= 500:
+                                if attempt < retry_attempts - 1:
+                                    await asyncio.sleep(0.2 * (2**attempt))
+                                    break
+                                raise self._error(
+                                    ProviderErrorCode.UNAVAILABLE,
+                                    "NetBox provider is unavailable",
+                                    context.operation,
+                                    retryable=True,
+                                )
+                            if 400 <= resp.status_code < 500:
+                                raise self._client_error(resp, context.operation)
+                            body = await self._read_capped(resp, context.operation)
                         try:
-                            data = resp.json()
+                            data = json.loads(body)
                         except ValueError as exc:
                             raise InventoryProviderError.from_exception(
                                 provider_id=self.id,
@@ -720,6 +725,51 @@ class NetBoxInventoryProvider(InventoryProvider):
         if headers:
             return headers
         return [stripped]
+
+    async def _read_capped(self, response: httpx.Response, operation: str) -> bytes:
+        """Read a streamed body, refusing one that grows past the configured cap.
+
+        A timeout bounds how long a read may take. Nothing bounded how much it may
+        return, and the two are not the same failure: a source that answers steadily and
+        forever never trips a timeout, and the body is buffered in the API process
+        before anything parses it. So the read stops at a byte count rather than only at
+        a clock.
+
+        The declared ``Content-Length`` is checked first where there is one, so an
+        oversized response costs nothing to refuse, but it is only an optimisation --
+        the header is the sender's claim about itself. The running total is what
+        actually decides, which is what makes a chunked response with no length, or one
+        whose length lies, no different from any other.
+        """
+        cap = self.config.max_response_bytes
+        declared = response.headers.get("content-length")
+        if declared is not None:
+            try:
+                if int(declared) > cap:
+                    raise self._too_large(operation, cap)
+            except ValueError:
+                # An unparsable length decides nothing; the running total still does.
+                pass
+        chunks: builtins.list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > cap:
+                # Abandoned unparsed, and the `async with` closes the connection on the
+                # way out rather than draining what is left of the body.
+                raise self._too_large(operation, cap)
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    def _too_large(self, operation: str, cap: int) -> InventoryProviderError:
+        """The one error a capped read raises; not retryable, because a retry reads it again."""
+        return self._error(
+            ProviderErrorCode.SCHEMA_VALIDATION_FAILED,
+            f"NetBox response exceeded the {cap}-byte limit for this provider",
+            operation,
+            retryable=False,
+            safe_details={"max_response_bytes": cap},
+        )
 
     def _client_error(self, response: httpx.Response, operation: str) -> InventoryProviderError:
         status_code = response.status_code

@@ -1256,3 +1256,107 @@ async def test_a_family_that_is_not_a_device_still_reads(
     )
 
     assert [obj.external_id for obj in objects] == ["7"]
+
+
+def _bytes_response(payload: bytes, *, declare_length: bool) -> httpx.Response:
+    """A response that streams ``payload``, with or without a Content-Length header.
+
+    A chunked response declares no length, which is exactly the case a header check
+    cannot decide and the running total has to.
+    """
+    if declare_length:
+        return httpx.Response(200, content=payload)
+    return httpx.Response(
+        200,
+        stream=_ChunkedStream(payload),
+        headers={"content-type": "application/json"},
+    )
+
+
+class _ChunkedStream(httpx.AsyncByteStream):
+    """Hands the body over in small pieces and never declares its length."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    async def __aiter__(self) -> Any:
+        for start in range(0, len(self._payload), 1024):
+            yield self._payload[start : start + 1024]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declare_length", [True, False])
+async def test_a_response_past_the_cap_is_refused_unparsed(
+    monkeypatch: pytest.MonkeyPatch, declare_length: bool
+) -> None:
+    """Valid JSON is still refused once it is too big, declared length or not.
+
+    The payload parses perfectly. Size is the whole objection, so a cap that only
+    rejected malformed bodies would not be this cap.
+    """
+    payload = b'{"results": [' + b'{"id": 1, "name": "x"},' * 20_000 + b'{"id": 2}], "next": null}'
+    assert len(payload) > 128 * 1024
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return _bytes_response(payload, declare_length=declare_length)
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider({"max_response_bytes": 64 * 1024}, token="netbox-token")
+
+    with pytest.raises(InventoryProviderError) as raised:
+        await provider.list_objects(
+            "interface",
+            context=ProviderCallContext(provider_id="netbox:primary", operation="cap-test"),
+        )
+
+    envelope = raised.value.envelope
+    assert envelope.code == ProviderErrorCode.SCHEMA_VALIDATION_FAILED
+    # Not retryable: the same read returns the same oversized body.
+    assert envelope.retryable is False
+    assert envelope.safe_details["max_response_bytes"] == 64 * 1024
+
+
+@pytest.mark.asyncio
+async def test_a_response_under_the_cap_is_read_normally(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cap is a ceiling, not a toll: an ordinary body is unaffected."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [{"id": 7, "name": "eth0"}], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider({"max_response_bytes": 64 * 1024}, token="netbox-token")
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="cap-test"),
+    )
+
+    assert [obj.external_id for obj in objects] == ["7"]
+
+
+@pytest.mark.asyncio
+async def test_a_lying_content_length_does_not_get_past_the_running_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A declared length under the cap decides nothing; the bytes actually read do.
+
+    The header is the sender's claim about itself, so treating it as the check would
+    make the cap advisory for anyone who cared to evade it.
+    """
+    payload = b'{"results": [' + b'{"id": 1, "name": "x"},' * 20_000 + b'{"id": 2}], "next": null}'
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        response = _bytes_response(payload, declare_length=False)
+        response.headers["content-length"] = "128"
+        return response
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider({"max_response_bytes": 64 * 1024}, token="netbox-token")
+
+    with pytest.raises(InventoryProviderError) as raised:
+        await provider.list_objects(
+            "interface",
+            context=ProviderCallContext(provider_id="netbox:primary", operation="cap-test"),
+        )
+
+    assert raised.value.envelope.safe_details["max_response_bytes"] == 64 * 1024
