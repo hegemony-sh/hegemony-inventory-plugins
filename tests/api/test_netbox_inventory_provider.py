@@ -6,12 +6,15 @@
 
 from __future__ import annotations
 
+import json
+import pathlib
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 import pytest
 
-from hegemony_inventory_netbox import provider as netbox_provider_module
+from hegemony_inventory_netbox import object_types as catalogue, provider as netbox_provider_module
 from hegemony_inventory_netbox.config import NetBoxProviderConfig
 from hegemony_inventory_netbox.provider import NetBoxInventoryProvider
 from hegemony_inventory_sdk import (
@@ -1487,3 +1490,126 @@ async def test_a_netbox_that_answers_status_with_less_still_passes(
     assert result.ok is True
     assert result.message == "NetBox connection succeeded"
     assert result.safe_details == {}
+
+
+_SCHEMA_FIXTURE = (
+    pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "netbox-4.3-schema.json"
+)
+
+
+def _discovery_handler(
+    schema: dict[str, Any] | None = None,
+    *,
+    custom_fields: list[dict[str, Any]] | None = None,
+    schema_status: int = 200,
+) -> tuple[Callable[[httpx.Request], Any], list[str]]:
+    """A NetBox that answers status, schema and custom fields, recording what was asked."""
+    requested: list[str] = []
+    document = json.loads(_SCHEMA_FIXTURE.read_text()) if schema is None else schema
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path == "/api/status/":
+            return httpx.Response(200, json={"netbox-full-version": "4.3.0-Docker-3.3.0"})
+        if request.url.path == "/api/schema/":
+            if schema_status != 200:
+                return httpx.Response(schema_status, json={"detail": "not found"})
+            return httpx.Response(200, json=document)
+        if request.url.path == "/api/extras/custom-fields/":
+            return httpx.Response(200, json={"results": custom_fields or [], "next": None})
+        return httpx.Response(404, json={"detail": "unexpected"})
+
+    return handler, requested
+
+
+async def _test_connection(provider: NetBoxInventoryProvider) -> Any:
+    return await provider.test_connection(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="test_connection",
+            query_hash="discovery",
+            config_version=1,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_connection_test_leaves_the_schema_alone_unless_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The schema is several megabytes. A connection test does not fetch it by default."""
+    handler, requested = _discovery_handler()
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _test_connection(_provider(token="netbox-token"))
+
+    assert requested == ["/api/status/"]
+    assert result.ok is True
+    assert "netbox_families_served" not in result.safe_details
+
+
+@pytest.mark.asyncio
+async def test_a_discovering_connection_test_reports_what_the_instance_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Asked to, it answers the question a shipped catalogue cannot: what does *this* one have."""
+    handler, requested = _discovery_handler(
+        custom_fields=[
+            {
+                "name": "hegemony_ssh_ref",
+                "type": {"value": "text"},
+                "object_types": ["dcim.device"],
+            }
+        ]
+    )
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _test_connection(_provider({"schema_discovery": True}, token="netbox-token"))
+
+    assert requested == ["/api/status/", "/api/schema/", "/api/extras/custom-fields/"]
+    assert result.ok is True
+    assert result.safe_details["netbox_full_version"] == "4.3.0-Docker-3.3.0"
+    assert result.safe_details["netbox_families_offered"] == len(catalogue.OBJECT_TYPES)
+    assert result.safe_details["netbox_families_undeclared"] > 0
+    assert result.safe_details["netbox_custom_fields"] == 1
+    # A stock 4.3 serves every family the catalogue offers and no shape it cannot read.
+    assert "netbox_families_missing" not in result.safe_details
+    assert "netbox_schema_warnings" not in result.safe_details
+
+
+@pytest.mark.asyncio
+async def test_discovery_names_the_object_types_this_netbox_cannot_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The answer to ticking an object type and syncing nothing at all.
+
+    An older release, or one whose plugins were trimmed, does not serve every family the
+    catalogue offers. Until this, nothing said so until the first empty sync.
+    """
+    document = json.loads(_SCHEMA_FIXTURE.read_text())
+    removed = catalogue.BY_ID["vpn_tunnel"]
+    document["paths"].pop(removed.endpoint)
+    handler, _requested = _discovery_handler(document)
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _test_connection(_provider({"schema_discovery": True}, token="netbox-token"))
+
+    assert result.ok is True
+    assert result.safe_details["netbox_families_missing"] == ["vpn_tunnel"]
+    assert result.safe_details["netbox_families_offered"] == len(catalogue.OBJECT_TYPES) - 1
+
+
+@pytest.mark.asyncio
+async def test_a_schema_it_cannot_read_leaves_the_connection_test_passing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The connection already succeeded. Losing the extra detail must not undo that."""
+    handler, requested = _discovery_handler(schema_status=404)
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _test_connection(_provider({"schema_discovery": True}, token="netbox-token"))
+
+    assert "/api/schema/" in requested
+    assert result.ok is True
+    assert result.error is None
+    assert result.safe_details == {"netbox_full_version": "4.3.0-Docker-3.3.0"}

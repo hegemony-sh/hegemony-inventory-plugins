@@ -36,7 +36,13 @@ from hegemony_inventory_sdk import (
 )
 
 from .config import DEFAULT_FIELD_MAP, NetBoxProviderConfig
-from .derive import SourceStatus, read_status
+from .derive import (
+    DiscoveryReport,
+    SourceStatus,
+    compare_to_catalogue,
+    derive_catalogue,
+    read_status,
+)
 from .object_types import ALL_OBJECT_TYPE_IDS, NetBoxObjectType, sources_for
 
 KNOWN_AUTH_SCHEMES = frozenset({"bearer", "token", "basic"})
@@ -517,6 +523,7 @@ class NetBoxInventoryProvider(InventoryProvider):
         """
         start = monotonic()
         status = SourceStatus()
+        report: DiscoveryReport | None = None
         try:
             await self._services.validate_url(str(self.config.url), operation="test_connection")
             status = read_status(await self._request_json("/api/status/", context))
@@ -531,6 +538,8 @@ class NetBoxInventoryProvider(InventoryProvider):
             ok = False
             error = exc.envelope.to_dict()
             message = exc.envelope.message
+        if ok and self.config.schema_discovery:
+            report = await self._discover(context)
         return ProviderTestResult(
             ok=ok,
             provider_id=self.id,
@@ -538,8 +547,35 @@ class NetBoxInventoryProvider(InventoryProvider):
             latency_ms=int((monotonic() - start) * 1000),
             message=message,
             error=error,
-            safe_details=status.safe_details,
+            safe_details={**status.safe_details, **(report.safe_details if report else {})},
         )
+
+    async def _discover(self, context: ProviderCallContext) -> DiscoveryReport | None:
+        """Ask this NetBox what it serves, and measure it against the shipped catalogue.
+
+        Deliberately best-effort. The connection this is reporting on already succeeded,
+        so a schema that cannot be fetched or parsed -- an older release, a proxy that
+        strips the endpoint, a NetBox large enough to time out -- must leave that result
+        alone rather than turn a working provider into a failing one. What is lost is
+        the extra detail, which is why there is nothing to say when it fails.
+        """
+        try:
+            # NetBox negotiates on Accept and defaults to YAML; drf-spectacular takes
+            # the format explicitly.
+            schema = await self._request_json("/api/schema/?format=json", context)
+            custom_fields = await self._paginated(
+                "/api/extras/custom-fields/",
+                context,
+                page_limit=self._services.limits.max_provider_pages,
+                result_limit=self._services.limits.max_preview_devices,
+            )
+            derived = derive_catalogue(schema, custom_fields=custom_fields)
+        except InventoryProviderError:
+            return None
+        except (ValueError, TypeError, KeyError, AttributeError):
+            # A document shaped like nothing the deriver knows. Same trade as above.
+            return None
+        return compare_to_catalogue(derived, custom_fields=len(custom_fields))
 
     async def _request_json(self, path_or_url: str, context: ProviderCallContext) -> dict[str, Any]:
         await self._services.validate_url(str(self.config.url), operation=context.operation)

@@ -55,12 +55,14 @@ from typing import Any
 
 from hegemony_inventory_sdk import RelationshipMapping
 
-from .object_types import Attr, NetBoxObjectType, qualified_object_type_id
+from .object_types import OBJECT_TYPES, Attr, NetBoxObjectType, qualified_object_type_id
 from .overlay import DEFAULT_EDGE_KEY, DEFAULT_OVERLAY, Overlay, ReplacedField
 
 __all__ = [
     "DerivedCatalogue",
+    "DiscoveryReport",
     "SourceStatus",
+    "compare_to_catalogue",
     "custom_field_attributes",
     "derive_catalogue",
     "read_status",
@@ -685,3 +687,64 @@ def _stale_overlay_warnings(overlay: Overlay, endpoints: frozenset[str] | set[st
         if endpoint not in endpoints:
             warnings.append(f"overlay keeps {name!r} on unknown endpoint {endpoint}")
     return warnings
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryReport:
+    """What one NetBox instance serves, measured against what this plugin offers.
+
+    The shipped catalogue is a claim about NetBox in general. This is the answer for
+    the NetBox in front of you, and the two differ in both directions: a family the
+    catalogue offers may not exist on an older release or a trimmed install, and an
+    instance serves families -- its plugins' models above all -- that no shipped
+    catalogue could have anticipated.
+    """
+
+    source_version: str | None
+    #: Collection endpoints this instance serves, after the overlay's skip list.
+    families_served: int
+    #: Catalogue families this instance serves, so they can actually sync.
+    families_offered: int
+    #: Catalogue families this instance does **not** serve. Ticking one of these on the
+    #: provider form is how an object type comes to sync nothing at all, and until now
+    #: nothing said so before the first empty sync.
+    families_missing: tuple[str, ...]
+    #: Families this instance serves that the catalogue does not offer.
+    families_undeclared: int
+    #: Custom fields defined on this instance. No shipped catalogue can carry these.
+    custom_fields: int
+    #: Shapes the deriver did not recognise. Empty on a stock 4.3, so anything here is
+    #: a later release or a plugin model worth teaching the overlay about.
+    warnings: tuple[str, ...]
+
+    @property
+    def safe_details(self) -> dict[str, Any]:
+        """The report as connection-test detail: counts and type ids, no instance data."""
+        details: dict[str, Any] = {
+            "netbox_families_served": self.families_served,
+            "netbox_families_offered": self.families_offered,
+            "netbox_families_undeclared": self.families_undeclared,
+            "netbox_custom_fields": self.custom_fields,
+        }
+        if self.families_missing:
+            details["netbox_families_missing"] = list(self.families_missing)
+        if self.warnings:
+            details["netbox_schema_warnings"] = list(self.warnings)
+        return details
+
+
+def compare_to_catalogue(derived: DerivedCatalogue, *, custom_fields: int = 0) -> DiscoveryReport:
+    """Measure a derived catalogue against the one this plugin ships."""
+    served = {entry.endpoint for entry in derived.object_types}
+    missing = tuple(entry.id for entry in OBJECT_TYPES if entry.endpoint not in served)
+    offered = len(OBJECT_TYPES) - len(missing)
+    catalogued = {entry.endpoint for entry in OBJECT_TYPES}
+    return DiscoveryReport(
+        source_version=derived.source_version,
+        families_served=len(served),
+        families_offered=offered,
+        families_missing=missing,
+        families_undeclared=len(served - catalogued),
+        custom_fields=custom_fields,
+        warnings=derived.warnings,
+    )

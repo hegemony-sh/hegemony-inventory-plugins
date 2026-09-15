@@ -34,6 +34,7 @@ rendered automatically and `token_ref` gets a secret picker.
 | `auth_scheme` | no | `Bearer` | Authorization scheme prefixed to the resolved token |
 | `auth_fallback_schemes` | no | `["Token"]` | Schemes retried on auth failure |
 | `verify_tls` | no | `true` | Verify the TLS certificate |
+| `schema_discovery` | no | `false` | Have the connection test also ask this NetBox what it serves — see [Ask an instance what it has](#ask-an-instance-what-it-has). Off by default: the schema is several megabytes |
 | `device_query` | no | `""` | NetBox device filter applied to **every** device read, e.g. `status=active&role=wan-edge` |
 | `site_tree_source` | no | `region` | Which NetBox hierarchy becomes the site tree: `region`, `site_group` or `none`. The other axis is still tagged |
 | `tag_key_prefix` | no | `tag:` | Prefix for NetBox tag slugs surfaced as filterable device tags. Set to `""` for bare keys |
@@ -478,6 +479,30 @@ appears in the connection test's details as `netbox_version`, `netbox_full_versi
 
 That is also the cheap half of discovery: a schema is only valid for the version that
 produced it, so the version is what you ask for first.
+
+### Ask an instance what it has
+
+Everything above measures the deriver against a *recorded* schema. Set
+`schema_discovery` and the connection test measures it against the NetBox in front of
+you: it fetches that instance's `/api/schema/` and `/api/extras/custom-fields/`, derives
+a catalogue from them, and reports the difference alongside the release and plugin list.
+
+| Detail | What it answers |
+|---|---|
+| `netbox_families_served` | How many collection endpoints this instance serves |
+| `netbox_families_offered` | How many of the catalogue's families it serves, so they can actually sync |
+| `netbox_families_missing` | **Catalogue families it does not serve.** Ticking one of these is how an object type comes to sync nothing at all, and nothing said so before the first empty sync |
+| `netbox_families_undeclared` | Families it serves that the catalogue does not offer — its plugins' models among them |
+| `netbox_custom_fields` | Custom fields defined on it. No shipped catalogue can carry these |
+| `netbox_schema_warnings` | Shapes the deriver did not recognise. Empty on a stock 4.3, so anything here is a later release or a plugin model worth teaching the overlay about |
+
+It is **off by default** because the schema is several megabytes on a stock install, where
+a connection test is otherwise a few hundred bytes, and because nothing else reads it yet.
+
+It is also **best-effort**. The connection it reports on has already succeeded by the time
+the schema is fetched, so a schema that cannot be read — an older release, a proxy that
+strips the endpoint, an instance large enough to time out — costs the extra detail and
+nothing else. A working provider never fails its connection test because discovery did.
 
 ### Regenerating the fixture
 

@@ -80,6 +80,19 @@ class NetBoxProviderConfig(BaseModel):
         description="Fallback Authorization schemes retried after auth failures when the token is unprefixed.",
     )
     verify_tls: bool = True
+    schema_discovery: bool = Field(
+        False,
+        description=(
+            "Have the connection test also ask this NetBox what it serves. Every NetBox "
+            "publishes an OpenAPI description of its own API at /api/schema/, generated "
+            "from the models it is actually running, and it is the only way to learn what "
+            "THIS instance has: which of the offered object types it serves, what its "
+            "plugins add, and which custom fields are defined on it. Off by default "
+            "because that document is several megabytes on a stock install, where a "
+            "connection test is otherwise a few hundred bytes. Nothing else reads it: a "
+            "failure to fetch or parse it leaves the connection test's own result alone."
+        ),
+    )
     device_query: str = Field(
         "",
         max_length=2048,
