@@ -50,12 +50,18 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from hegemony_inventory_sdk import RelationshipMapping
 
-from .object_types import OBJECT_TYPES, Attr, NetBoxObjectType, qualified_object_type_id
+from .object_types import (
+    OBJECT_TYPE_IDS_BY_QUALIFIED,
+    OBJECT_TYPES,
+    Attr,
+    NetBoxObjectType,
+    qualified_object_type_id,
+)
 from .overlay import DEFAULT_EDGE_KEY, DEFAULT_OVERLAY, Overlay, ReplacedField
 
 __all__ = [
@@ -66,6 +72,7 @@ __all__ = [
     "custom_field_attributes",
     "derive_catalogue",
     "read_status",
+    "registered_catalogue",
 ]
 
 _LIST_ENDPOINT = re.compile(r"^/api/(?P<app>[a-z0-9-]+)/(?P<family>[a-z0-9-]+)/$")
@@ -748,3 +755,43 @@ def compare_to_catalogue(derived: DerivedCatalogue, *, custom_fields: int = 0) -
         custom_fields=custom_fields,
         warnings=derived.warnings,
     )
+
+
+#: Families the platform reads through its device and site contract rather than as
+#: generic objects. Discovery leaves them out -- offering them again would store every
+#: device twice -- but keeps them as relationship targets, which is how an interface
+#: still reaches its device.
+CORE_CONTRACT_IDS: Mapping[str, str] = {"dcim.devices": "device", "dcim.sites": "site"}
+
+
+def registered_catalogue(derived: DerivedCatalogue) -> tuple[NetBoxObjectType, ...]:
+    """Re-key a derived catalogue onto the ids this plugin registers.
+
+    Discovery has to **extend** what a provider offers, not shadow it. The deriver names
+    families by their endpoint (``dcim.interfaces``), while the plugin registers
+    hand-chosen ids (``interface``); returning the derived spelling would leave an
+    instance offering both for the same family, and every row already synced under the
+    registered id stranded.
+
+    So a family the catalogue already knows keeps its registered id, and only families it
+    does not -- a later release's, a NetBox plugin's -- arrive under the derived one.
+    Relationship targets are re-keyed the same way, or an edge would point at an id
+    nothing serves. :data:`~.object_types.LEGACY_OBJECT_TYPE_IDS` is the table both use.
+    """
+    renamed = {**OBJECT_TYPE_IDS_BY_QUALIFIED, **CORE_CONTRACT_IDS}
+    catalogue: list[NetBoxObjectType] = []
+    for entry in derived.object_types:
+        if entry.id in CORE_CONTRACT_IDS:
+            continue
+        relationships = tuple(
+            RelationshipMapping(
+                rel=edge.rel,
+                target_object_type=renamed.get(edge.target_object_type, edge.target_object_type),
+                source=edge.source,
+            )
+            for edge in entry.relationships
+        )
+        catalogue.append(
+            replace(entry, id=renamed.get(entry.id, entry.id), relationships=relationships)
+        )
+    return tuple(catalogue)

@@ -19,6 +19,7 @@ import httpx
 from hegemony_inventory_sdk import (
     Capability,
     DeviceDescriptor,
+    DiscoveryResult,
     InventoryProvider,
     InventoryProviderError,
     MaintenanceState,
@@ -37,11 +38,13 @@ from hegemony_inventory_sdk import (
 
 from .config import DEFAULT_FIELD_MAP, NetBoxProviderConfig
 from .derive import (
+    DerivedCatalogue,
     DiscoveryReport,
     SourceStatus,
     compare_to_catalogue,
     derive_catalogue,
     read_status,
+    registered_catalogue,
 )
 from .object_types import ALL_OBJECT_TYPE_IDS, NetBoxObjectType, sources_for
 
@@ -127,7 +130,7 @@ _SITE_TREE_SOURCES: dict[str, tuple[str, str, str, str]] = {
 
 class NetBoxInventoryProvider(InventoryProvider):
     provider_type = "netbox"
-    capabilities = frozenset({Capability.READ, Capability.QUERY})
+    capabilities = frozenset({Capability.READ, Capability.QUERY, Capability.DISCOVER})
     # Every family in the catalogue, plus devices and sites. This is the whole space
     # the provider can read, and it is deliberately not narrowed per instance: which
     # of them a given provider actually syncs is the platform's own object-type
@@ -539,7 +542,7 @@ class NetBoxInventoryProvider(InventoryProvider):
             error = exc.envelope.to_dict()
             message = exc.envelope.message
         if ok and self.config.schema_discovery:
-            report = await self._discover(context)
+            report = await self._discovery_report(context)
         return ProviderTestResult(
             ok=ok,
             provider_id=self.id,
@@ -550,26 +553,65 @@ class NetBoxInventoryProvider(InventoryProvider):
             safe_details={**status.safe_details, **(report.safe_details if report else {})},
         )
 
-    async def _discover(self, context: ProviderCallContext) -> DiscoveryReport | None:
-        """Ask this NetBox what it serves, and measure it against the shipped catalogue.
+    async def discover(self, *, context: ProviderCallContext) -> DiscoveryResult:
+        """Describe what this NetBox serves, from its own OpenAPI document.
 
-        Deliberately best-effort. The connection this is reporting on already succeeded,
-        so a schema that cannot be fetched or parsed -- an older release, a proxy that
-        strips the endpoint, a NetBox large enough to time out -- must leave that result
-        alone rather than turn a working provider into a failing one. What is lost is
-        the extra detail, which is why there is nothing to say when it fails.
+        This is the answer the shipped catalogue cannot give. It is written against
+        NetBox in general; an instance runs one release, with its own plugins installed
+        and its own custom fields defined, and only it can say which object types those
+        add up to.
+
+        Families the catalogue already knows keep the ids this plugin registers, so
+        discovery extends what a provider offers instead of shadowing it -- see
+        :func:`~.derive.registered_catalogue`. Devices and sites are left out because the
+        platform reads them through its own contract.
+
+        Unlike the connection test's best-effort probe, a failure here is raised: the
+        caller asked for a description and there is none to give.
+        """
+        derived, custom_fields = await self._fetch_derived(context)
+        catalogue = registered_catalogue(derived)
+        return DiscoveryResult(
+            source_version=derived.source_version,
+            object_types=tuple(entry.spec for entry in catalogue),
+            mappings={entry.id: entry.mapping for entry in catalogue},
+            warnings=(
+                *derived.warnings,
+                *(
+                    f"{len(custom_fields)} custom fields were read from this instance"
+                    for _ in (0,)
+                    if custom_fields
+                ),
+            ),
+        )
+
+    async def _fetch_derived(
+        self, context: ProviderCallContext
+    ) -> tuple[DerivedCatalogue, builtins.list[dict[str, Any]]]:
+        """Read this instance's schema and custom fields, and derive a catalogue."""
+        # NetBox negotiates on Accept and defaults to YAML; drf-spectacular takes the
+        # format explicitly.
+        schema = await self._request_json("/api/schema/?format=json", context)
+        custom_fields = await self._paginated(
+            "/api/extras/custom-fields/",
+            context,
+            page_limit=self._services.limits.max_provider_pages,
+            result_limit=self._services.limits.max_preview_devices,
+        )
+        return derive_catalogue(schema, custom_fields=custom_fields), custom_fields
+
+    async def _discovery_report(self, context: ProviderCallContext) -> DiscoveryReport | None:
+        """The connection test's summary of the same description.
+
+        Deliberately best-effort, unlike :meth:`discover`. The connection this reports on
+        already succeeded, so a schema that cannot be fetched or parsed -- an older
+        release, a proxy that strips the endpoint, a NetBox large enough to time out --
+        must leave that result alone rather than turn a working provider into a failing
+        one. What is lost is the extra detail, which is why there is nothing to say when
+        it fails.
         """
         try:
-            # NetBox negotiates on Accept and defaults to YAML; drf-spectacular takes
-            # the format explicitly.
-            schema = await self._request_json("/api/schema/?format=json", context)
-            custom_fields = await self._paginated(
-                "/api/extras/custom-fields/",
-                context,
-                page_limit=self._services.limits.max_provider_pages,
-                result_limit=self._services.limits.max_preview_devices,
-            )
-            derived = derive_catalogue(schema, custom_fields=custom_fields)
+            derived, custom_fields = await self._fetch_derived(context)
         except InventoryProviderError:
             return None
         except (ValueError, TypeError, KeyError, AttributeError):

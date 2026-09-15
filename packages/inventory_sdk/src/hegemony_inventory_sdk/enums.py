@@ -21,6 +21,12 @@ class Capability(str, Enum):
     QUERY = "query"
     WRITE = "write"
     WEBHOOK = "webhook"
+    #: The provider can describe the instance it is configured against, rather than only
+    #: the object types its plugin was written to know about. A source of truth that can
+    #: be extended -- NetBox with plugins installed, custom fields defined -- serves
+    #: object types no shipped catalogue could have anticipated, and only the instance
+    #: can say what they are.
+    DISCOVER = "discover"
 
 
 class ResourceType(str, Enum):

@@ -17,6 +17,7 @@ from hegemony_inventory_git.loader import load_git_inventory
 from hegemony_inventory_git.provider import GitInventoryProvider
 from hegemony_inventory_git.query import matches_query
 from hegemony_inventory_sdk import (
+    Capability,
     DeviceDescriptor,
     InventoryProviderError,
     ProviderCallContext,
@@ -606,3 +607,30 @@ async def test_git_provider_device_can_override_the_default_jump_host(tmp_path: 
         "port": 2022,
         "username_ref": "{{ secret('vault://lab/bastion/username') }}",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_does_not_discover_says_so(tmp_path: Path) -> None:
+    """Discovery is opt-in, and a source of truth with a fixed shape opts out.
+
+    A Git inventory serves exactly the object types this plugin was written for -- there
+    is no instance-specific answer to give -- so it neither declares the capability nor
+    implements the method, and the SDK's default says exactly that.
+    """
+    provider = GitInventoryProvider(
+        provider_id="git:primary",
+        config={"git_repo_id": str(uuid4()), "path": "inventory"},
+        services=FakePlatformServices(
+            provider_id="git:primary",
+            provider_type="git",
+            git=FakeGitFetcher(path=str(tmp_path)),
+        ),
+    )
+    assert Capability.DISCOVER not in provider.capabilities
+    with pytest.raises(InventoryProviderError) as raised:
+        await provider.discover(
+            context=ProviderCallContext(provider_id=provider.id, operation="discover")
+        )
+    assert raised.value.envelope.code == ProviderErrorCode.MALFORMED_QUERY
+    assert raised.value.envelope.retryable is False
+    assert "discover" in raised.value.envelope.message

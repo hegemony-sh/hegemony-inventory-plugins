@@ -504,6 +504,29 @@ the schema is fetched, so a schema that cannot be read — an older release, a p
 strips the endpoint, an instance large enough to time out — costs the extra detail and
 nothing else. A working provider never fails its connection test because discovery did.
 
+### Discovery as a contract
+
+`schema_discovery` above reports the gap. `discover()` returns the description itself,
+as the SDK's `DiscoveryResult` — every object type this instance serves, each with the
+mapping to read it, plus the release that produced the answer. The provider declares
+`Capability.DISCOVER` so the platform knows it can ask.
+
+It **extends** the shipped catalogue rather than shadowing it. A family the catalogue
+already knows keeps the id this plugin registers (`interface`, not `dcim.interfaces`);
+only families it does not — a later release's, a NetBox plugin's — arrive under the
+derived app-qualified id. Relationship targets are re-keyed the same way, so an
+interface discovered on a live instance still points at `device`. Without that rule an
+instance would offer two object types for every family, and every row already synced
+under the registered id would be stranded.
+
+Devices and sites are left out entirely: the platform reads those through its own
+device and site contract, and offering them again as generic objects would store every
+device twice. They remain relationship *targets*, which is how a discovered interface
+still reaches its device.
+
+Where the connection test's probe is best-effort, `discover()` raises. The caller asked
+for the description, and there is nothing to return in its place.
+
 ### Regenerating the fixture
 
 `tests/fixtures/netbox-4.3-schema.json` is a real document, reduced to what the deriver

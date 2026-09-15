@@ -25,6 +25,7 @@ from .descriptors import (
     device_to_object_descriptor,
     site_to_object_descriptor,
 )
+from .discovery import DiscoveryResult
 from .enums import Capability, MaintenanceState, ProviderErrorCode, ResourceType
 from .errors import InventoryProviderError, ProviderErrorEnvelope, not_supported
 from .mapping import (
@@ -52,6 +53,7 @@ __all__ = [
     "Capability",
     "ChangeEvent",
     "DeviceDescriptor",
+    "DiscoveryResult",
     "GitFetcher",
     "GitWorkdir",
     "InventoryLimits",

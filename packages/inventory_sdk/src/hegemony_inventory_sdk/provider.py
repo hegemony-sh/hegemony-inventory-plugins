@@ -29,6 +29,7 @@ from .descriptors import (
     device_to_object_descriptor,
     site_to_object_descriptor,
 )
+from .discovery import DiscoveryResult
 from .enums import Capability, ResourceType
 from .errors import not_supported
 
@@ -146,6 +147,26 @@ class InventoryProvider(ABC):
             getattr(self, "provider_type", "unknown"),
             f"get_object:{object_type}",
         )
+
+    # ── Optional capabilities ──
+
+    async def discover(self, *, context: ProviderCallContext) -> DiscoveryResult:
+        """Describe the object types *this instance* serves.
+
+        A provider type's object types are declared once, at registration, and are the
+        same for every instance of it. That is right for a source of truth with a fixed
+        shape and wrong for one that can be extended: a NetBox with plugins installed
+        serves models this plugin has never heard of, and every instance has its own
+        custom fields.
+
+        A provider declaring :attr:`~.enums.Capability.DISCOVER` implements this to let
+        the platform ask. The default raises ``not_supported``, so a provider whose shape
+        really is fixed needs no change and behaves exactly as before.
+
+        Expensive by nature -- it describes a whole API rather than reading one object --
+        so the platform calls it on demand and stores the answer, rather than per sync.
+        """
+        raise not_supported(self.id, self.provider_type, "discover")
 
     # ── Optional future capabilities ──
 

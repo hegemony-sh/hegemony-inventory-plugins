@@ -18,6 +18,7 @@ from hegemony_inventory_netbox import object_types as catalogue, provider as net
 from hegemony_inventory_netbox.config import NetBoxProviderConfig
 from hegemony_inventory_netbox.provider import NetBoxInventoryProvider
 from hegemony_inventory_sdk import (
+    Capability,
     InventoryProviderError,
     MaintenanceState,
     ProviderCallContext,
@@ -1613,3 +1614,90 @@ async def test_a_schema_it_cannot_read_leaves_the_connection_test_passing(
     assert result.ok is True
     assert result.error is None
     assert result.safe_details == {"netbox_full_version": "4.3.0-Docker-3.3.0"}
+
+
+@pytest.mark.asyncio
+async def test_discovery_extends_the_registered_catalogue_rather_than_shadowing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Families the plugin already knows keep the ids it registers.
+
+    Returning the derived spelling would leave an instance offering two object types for
+    the same family, and strand every row already synced under the registered one.
+    """
+    handler, _requested = _discovery_handler()
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _provider(token="netbox-token").discover(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="discover",
+            query_hash="discover",
+            config_version=1,
+        )
+    )
+
+    discovered = {spec.id for spec in result.object_types}
+    assert {entry.id for entry in catalogue.OBJECT_TYPES} <= discovered
+    assert "dcim.interfaces" not in discovered
+    # Devices and sites are read through the platform's own contract, so offering them
+    # again as generic objects would store every device twice.
+    assert "dcim.devices" not in discovered
+    assert "dcim.sites" not in discovered
+    # ...but an interface still reaches its device.
+    interface = next(spec for spec in result.object_types if spec.id == "interface")
+    assert ("device", "device") in {
+        (edge.rel, edge.target_object_type) for edge in interface.relationships
+    }
+    # And the instance's own families arrive under an app-qualified id.
+    assert any("." in object_type for object_type in discovered)
+    assert result.source_version is not None
+
+
+@pytest.mark.asyncio
+async def test_every_discovered_type_carries_the_mapping_to_read_it_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spec without its mapping is an object type nothing can actually fetch."""
+    handler, _requested = _discovery_handler()
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _provider(token="netbox-token").discover(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="discover",
+            query_hash="discover",
+            config_version=1,
+        )
+    )
+
+    assert {spec.id for spec in result.object_types} == set(result.mappings)
+    assert result.mappings["interface"].object_type == "interface"
+
+
+@pytest.mark.asyncio
+async def test_discovery_raises_where_the_connection_test_stays_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two read the same document for different reasons.
+
+    A connection test reports on a connection that already worked, so it swallows a
+    schema it cannot read. Discovery was asked for the description itself, and there is
+    nothing to return in its place.
+    """
+    handler, _requested = _discovery_handler(schema_status=404)
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    with pytest.raises(InventoryProviderError):
+        await _provider(token="netbox-token").discover(
+            context=ProviderCallContext(
+                provider_id="netbox:primary",
+                operation="discover",
+                query_hash="discover",
+                config_version=1,
+            )
+        )
+
+
+def test_the_netbox_provider_declares_the_capability_it_implements() -> None:
+    assert Capability.DISCOVER in _provider().capabilities

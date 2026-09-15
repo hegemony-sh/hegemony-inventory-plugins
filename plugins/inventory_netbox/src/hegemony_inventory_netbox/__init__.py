@@ -42,7 +42,7 @@ def register(registry: InventoryPluginRegistry) -> None:
             "Read and query devices, sites and any of NetBox's object families -- "
             "IPAM, interfaces, racks, circuits, virtual machines and more"
         ),
-        capabilities=[Capability.READ.value, Capability.QUERY.value],
+        capabilities=[Capability.READ.value, Capability.QUERY.value, Capability.DISCOVER.value],
         supported_resources=[
             ResourceType.DEVICE.value,
             ResourceType.SITE.value,

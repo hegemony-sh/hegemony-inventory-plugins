@@ -29,8 +29,10 @@ from hegemony_inventory_netbox.derive import (
     custom_field_attributes,
     derive_catalogue,
     read_status,
+    registered_catalogue,
 )
 from hegemony_inventory_netbox.overlay import DEFAULT_OVERLAY, Overlay
+from hegemony_inventory_sdk import DiscoveryResult, ObjectFieldMapping, ObjectTypeSpec
 
 _FIXTURE = pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "netbox-4.3-schema.json"
 _SCHEMA: dict[str, Any] = json.loads(_FIXTURE.read_text())
@@ -408,3 +410,35 @@ def test_the_status_probe_reports_nothing_it_was_not_told() -> None:
     """An older or proxied NetBox may answer with less; that is not an error."""
     assert read_status({}).safe_details == {}
     assert read_status({"plugins": []}).plugins == {}
+
+
+# ── The discovery contract ────────────────────────────────────────────────────
+
+
+def test_a_discovery_result_refuses_halves_that_disagree() -> None:
+    """A spec without its mapping is an object type nothing can fetch, and the reverse
+    is a mapping for something the platform will never render. Neither is storable, so
+    the result rejects them where they are built rather than where they are used.
+    """
+    spec = ObjectTypeSpec(id="dcim.racks", display_name="Rack")
+    mapping = ObjectFieldMapping(object_type="dcim.racks", identity="id", name_field="name")
+
+    assert DiscoveryResult(object_types=(spec,), mappings={"dcim.racks": mapping})
+
+    with pytest.raises(ValueError, match="dcim.racks"):
+        DiscoveryResult(object_types=(spec,))
+    with pytest.raises(ValueError, match="dcim.racks"):
+        DiscoveryResult(mappings={"dcim.racks": mapping})
+
+
+def test_an_empty_discovery_result_is_valid() -> None:
+    """An instance that serves nothing this provider understands is an answer, not an error."""
+    assert DiscoveryResult().object_types == ()
+
+
+def test_re_keying_leaves_a_family_the_catalogue_does_not_know_alone() -> None:
+    """The derived id is what a new family arrives under, because nothing else names it."""
+    catalogued = registered_catalogue(_DERIVED)
+    by_id = {entry.id: entry for entry in catalogued}
+    assert "circuits.circuit_groups" in by_id
+    assert by_id["circuits.circuit_groups"].endpoint == "/api/circuits/circuit-groups/"
