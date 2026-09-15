@@ -38,9 +38,16 @@ Five kinds of correction live here, and nothing else belongs:
 ``PRESENTATION``
     Browse columns and search fields where the derived default is poor.
 
-``EDGE_KEYS``
-    Which property identifies a family when something points at it, where that is not
-    its NetBox id.
+``EXTRA_ATTRIBUTES``
+    Properties worth reading that the deriver's one-level rule does not reach.
+
+``BINDINGS``
+    Which families are the platform's devices and sites, and how to read one from a
+    stored row. What used to be ``DEFAULT_FIELD_MAP``, said in the platform's terms.
+
+``EXTERNAL_ID_KEYS``
+    Which property identifies a family's rows, where that is not its NetBox id. One key
+    for storing a row and for citing it, because two keys for one thing is the defect.
 
 ``KEEP_PROPERTIES``
     Properties the deriver's noise rules drop that one family genuinely wants.
@@ -59,7 +66,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+from hegemony_inventory_sdk import ProjectionBinding
+
 from .catalogue_model import qualified_object_type_id
+from .config import DEFAULT_STATUS_MAP
 
 #: Referenced-object property to read, by the schema component naming that object.
 #:
@@ -238,6 +248,75 @@ REPLACED_FIELDS: Mapping[str, tuple[ReplacedField, ...]] = MappingProxyType(
 )
 
 
+#: Properties a family should carry that the deriver's own rules do not reach, by
+#: endpoint.
+#:
+#: The deriver reads one level into a reference and stores its natural key, which is
+#: right almost everywhere: a device's ``platform`` is its slug, its ``site`` its slug.
+#: A vendor is two levels down -- ``device_type.manufacturer.name`` -- and no rule that
+#: stops at one level can find it. The path is still the schema's own: ``BriefDeviceType``
+#: declares ``manufacturer`` and ``BriefManufacturer`` declares ``name``, so this says
+#: *read further*, not *trust me*.
+EXTRA_ATTRIBUTES: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {
+        "/api/dcim/devices/": MappingProxyType({"vendor": "device_type.manufacturer.name"}),
+    }
+)
+
+
+#: Which families are the platform's devices and sites, and how to read one from a stored
+#: row.
+#:
+#: This is the whole of what used to live in ``DEFAULT_FIELD_MAP`` and in the provider's
+#: synthetic site-tree code, said once and in the platform's own terms. Paths here read a
+#: *stored object's* attributes, not a NetBox payload: the family's own mapping has
+#: already resolved the dotted paths, so ``primary_ip4`` is the address and not the
+#: nested object.
+#:
+#: Regions carry a prefix because a NetBox slug is unique per model and not across them:
+#: a region and a site may both be ``gondor``, and the platform keys a site on
+#: ``(provider_id, external_id)``. Sites do not, so a site row keeps exactly the key the
+#: provider's device/site contract already stored it under and an upgrade re-uses the row
+#: rather than making a second one.
+BINDINGS: Mapping[str, ProjectionBinding] = MappingProxyType(
+    {
+        "/api/dcim/devices/": ProjectionBinding(
+            target="device",
+            object_type="device",
+            name="name",
+            hostname="primary_ip4",
+            vendor="vendor",
+            model="device_type",
+            platform="platform",
+            serial="serial",
+            site_edge="site",
+            maintenance_state="status",
+            maintenance_state_map=DEFAULT_STATUS_MAP,
+            secret_refs={
+                "ssh.username_ref": "custom_fields.hegemony_ssh_username_ref",
+                "ssh.password_ref": "custom_fields.hegemony_ssh_password_ref",
+                "ssh.private_key_ref": "custom_fields.hegemony_ssh_private_key_ref",
+                "enable.password_ref": "custom_fields.hegemony_enable_password_ref",
+            },
+            tags={"role": "role"},
+        ),
+        "/api/dcim/sites/": ProjectionBinding(
+            target="site",
+            object_type="site",
+            name="name",
+            parent_edge="region",
+        ),
+        "/api/dcim/regions/": ProjectionBinding(
+            target="site",
+            object_type="region",
+            name="name",
+            parent_edge="parent",
+            external_id_prefix="region:",
+        ),
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class Presentation:
     """Browse columns and search fields for one family, where the default is poor."""
@@ -250,15 +329,17 @@ class Presentation:
     description: str | None = None
 
 
-#: Property to cite when pointing *at* a family, where it is not the NetBox id.
+#: The property that identifies a family's rows, where it is not the NetBox id.
 #:
-#: An attribute and an edge want different things from the same reference. The attribute
-#: stores what a person reads -- a site's slug, a VLAN's number -- while an edge has to
-#: cite the target's **external id**, because that is the key the platform stored the
-#: target under and the only thing that will resolve back to it. For every NetBox family
-#: that is the numeric ``id``, which is why this table has one entry: the platform
-#: materialises sites through the site contract, which keys them on their slug.
-EDGE_KEYS: Mapping[str, str] = MappingProxyType({"/api/dcim/sites/": "slug"})
+#: One key, used for two things that must agree: the ``external_id`` a row is *stored*
+#: under, and the value an edge *cites* to reach it. Storing a site under its numeric id
+#: while every edge into it cites its slug is two keys for one thing, and two keys for
+#: one thing is how a NetBox site came to exist as two platform rows in the first place.
+#:
+#: Sites are the one entry because the platform's site contract keys them on their slug,
+#: which is what an operator recognises and what a site selector already holds. For every
+#: other family the NetBox id is both.
+EXTERNAL_ID_KEYS: Mapping[str, str] = MappingProxyType({"/api/dcim/sites/": "slug"})
 
 #: The object-type id this plugin registers for a NetBox endpoint.
 #:
@@ -285,6 +366,7 @@ REGISTERED_IDS: Mapping[str, str] = MappingProxyType(
         "/api/dcim/console-ports/": "console_port",
         "/api/dcim/device-roles/": "device_role",
         "/api/dcim/device-types/": "device_type",
+        "/api/dcim/devices/": "device",
         "/api/dcim/front-ports/": "front_port",
         "/api/dcim/interfaces/": "interface",
         "/api/dcim/inventory-items/": "inventory_item",
@@ -298,7 +380,10 @@ REGISTERED_IDS: Mapping[str, str] = MappingProxyType(
         "/api/dcim/power-panels/": "power_panel",
         "/api/dcim/power-ports/": "power_port",
         "/api/dcim/racks/": "rack",
+        "/api/dcim/regions/": "region",
         "/api/dcim/rear-ports/": "rear_port",
+        "/api/dcim/site-groups/": "site_group",
+        "/api/dcim/sites/": "site",
         "/api/dcim/virtual-chassis/": "virtual_chassis",
         "/api/dcim/virtual-device-contexts/": "virtual_device_context",
         "/api/extras/config-contexts/": "config_context",
@@ -329,29 +414,20 @@ REGISTERED_IDS: Mapping[str, str] = MappingProxyType(
     }
 )
 
-#: Families the platform reads through its own device and site contract rather than as
-#: generic objects. A generated catalogue leaves them out -- offering them again would
-#: store every device twice -- but they stay relationship targets, which is how an
-#: interface still reaches its device.
-CORE_CONTRACT_IDS: Mapping[str, str] = MappingProxyType(
-    {
-        "/api/dcim/devices/": "device",
-        "/api/dcim/sites/": "site",
-    }
-)
-
-#: Derived id -> registered id, for both tables above. Relationship edges cite object
-#: type ids rather than endpoints, so re-keying them needs this spelling.
+#: Derived id -> registered id. Relationship edges cite object type ids rather than
+#: endpoints, so re-keying them needs this spelling.
 REGISTERED_IDS_BY_DERIVED: Mapping[str, str] = MappingProxyType(
     {
         qualified_object_type_id(endpoint): object_type
-        for endpoint, object_type in {**REGISTERED_IDS, **CORE_CONTRACT_IDS}.items()
+        for endpoint, object_type in REGISTERED_IDS.items()
     }
 )
 
 
 #: The property every other family is cited by.
-DEFAULT_EDGE_KEY = "id"
+#: What identifies a row when the overlay says nothing: NetBox's own primary key, which
+#: every family has and which every reference to one carries.
+DEFAULT_EXTERNAL_ID_KEY = "id"
 
 
 #: Django content-type label by endpoint, where the deriver's rule cannot reach it.
@@ -419,7 +495,11 @@ class Overlay:
     )
     presentation: Mapping[str, Presentation] = field(default_factory=dict)
     content_types: Mapping[str, str] = field(default_factory=lambda: CONTENT_TYPES)
-    edge_keys: Mapping[str, str] = field(default_factory=lambda: EDGE_KEYS)
+    external_id_keys: Mapping[str, str] = field(default_factory=lambda: EXTERNAL_ID_KEYS)
+    extra_attributes: Mapping[str, Mapping[str, str]] = field(
+        default_factory=lambda: EXTRA_ATTRIBUTES
+    )
+    bindings: Mapping[str, ProjectionBinding] = field(default_factory=lambda: BINDINGS)
     keep_properties: frozenset[tuple[str, str]] = KEEP_PROPERTIES
     skip_endpoints: frozenset[str] = SKIP_ENDPOINTS
 

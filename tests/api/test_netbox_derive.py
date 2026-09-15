@@ -468,3 +468,62 @@ def test_re_keying_leaves_a_family_the_catalogue_does_not_know_alone() -> None:
     by_id = {entry.id: entry for entry in catalogued}
     assert "circuits.circuit_groups" in by_id
     assert by_id["circuits.circuit_groups"].endpoint == "/api/circuits/circuit-groups/"
+
+
+def test_the_catalogue_binds_devices_and_sites_onto_the_platforms_own_tables() -> None:
+    """Devices and sites are families now, and the binding is what keeps that safe.
+
+    Offering them as generic object types alone would store every device twice: once as
+    an object and once, through the old contract, as a device. The binding says the
+    stored rows *are* the devices and sites tables, so there is one read and one row.
+    """
+    bound = {entry.id: entry.binding for entry in catalogue.OBJECT_TYPES if entry.binding}
+    assert set(bound) == {"device", "site", "region"}
+    assert bound["device"].target == "device"
+    assert bound["site"].target == "site"
+    # A region becomes a site row too -- that is how a hierarchy living in another family
+    # becomes the platform's single-parent site tree -- and the prefix is what stops a
+    # region and a site of the same slug colliding on (provider_id, external_id).
+    assert bound["region"].target == "site"
+    assert bound["region"].external_id_prefix == "region:"
+    assert bound["site"].external_id_prefix == ""
+
+
+@pytest.mark.parametrize("entry", catalogue.OBJECT_TYPES, ids=lambda entry: entry.id)
+def test_every_edge_cites_the_key_its_target_is_stored_under(
+    entry: catalogue.NetBoxObjectType,
+) -> None:
+    """One key per family, for storing a row and for citing it.
+
+    This is the invariant the whole line of work exists to protect, stated once over the
+    whole catalogue. A site used to be stored under its numeric id while every edge into
+    it cited its slug: every row materialised, every link dangled, and nothing failed.
+    Checking each edge's key against the identity of the family it reaches is what makes
+    that loud -- and it has to be checked against the *target family*, not against the
+    same table both were read from, or it is a tautology that moves with the mistake.
+    """
+    by_id = {other.id: other for other in catalogue.OBJECT_TYPES}
+    for edge in entry.relationships:
+        target = by_id.get(edge.target_object_type)
+        if target is None:
+            continue
+        cited = edge.source.rsplit(".", 1)[-1]
+        assert cited == target.identity, (
+            f"{entry.id}.{edge.rel} cites {edge.target_object_type}.{cited}, but a "
+            f"{target.id} row is stored under its {target.identity!r} -- the edge "
+            "resolves to nothing"
+        )
+
+
+def test_the_site_tree_is_keyed_the_way_the_platform_already_stored_it() -> None:
+    """Sites keep their slug, which is the key the device/site contract used.
+
+    Not an arbitrary choice: an upgrade re-uses the site rows an earlier sync stored
+    rather than making a second set beside them, and a site selector already holding a
+    slug goes on resolving.
+    """
+    by_id = {entry.id: entry for entry in catalogue.OBJECT_TYPES}
+    assert by_id["site"].identity == "slug"
+    assert by_id["region"].identity == "id"
+    site_edge = next(edge for edge in by_id["device"].relationships if edge.rel == "site")
+    assert site_edge.source == "site.slug"

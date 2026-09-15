@@ -47,6 +47,8 @@ README_END = "<!-- end generated catalogue -->"
 
 sys.path.insert(0, str(PACKAGE.parent))
 
+from collections.abc import Mapping  # noqa: E402
+
 from hegemony_inventory_netbox.catalogue_model import (  # noqa: E402
     Attr,
     NetBoxObjectType,
@@ -56,6 +58,7 @@ from hegemony_inventory_netbox.derive import (  # noqa: E402
     derive_catalogue,
     registered_catalogue,
 )
+from hegemony_inventory_sdk import ProjectionBinding  # noqa: E402
 
 #: ``Attr`` shorthand per JSON type, matching the helpers in ``catalogue_model``. An
 #: attribute that constrains its values cannot use one and is written out in full.
@@ -86,6 +89,8 @@ falls back to when discovery has never succeeded.
 """
 
 from __future__ import annotations
+
+from hegemony_inventory_sdk import ProjectionBinding
 
 from .catalogue_model import (
     Attr,
@@ -125,6 +130,37 @@ def _attribute(attr: Attr) -> str:
     return f"{helper}({_literal(attr.path)}, nullable=False)"
 
 
+_BINDING_FIELDS: tuple[str, ...] = (
+    "target",
+    "object_type",
+    "name",
+    "hostname",
+    "vendor",
+    "model",
+    "platform",
+    "serial",
+    "site_edge",
+    "parent_edge",
+    "maintenance_state",
+    "maintenance_state_map",
+    "secret_refs",
+    "tags",
+    "external_id_prefix",
+)
+
+
+def _binding(binding: ProjectionBinding) -> str:
+    """A projection binding, with only the fields it actually sets."""
+    empty = ProjectionBinding(target=binding.target, object_type=binding.object_type)
+    parts = [
+        f"{name}={_literal(dict(value) if isinstance(value, Mapping) else value)}"
+        for name in _BINDING_FIELDS
+        if (value := getattr(binding, name)) != getattr(empty, name)
+        or name in ("target", "object_type")
+    ]
+    return f"ProjectionBinding({', '.join(parts)})"
+
+
 def _family(entry: NetBoxObjectType) -> str:
     """One family as a ``NetBoxObjectType(...)`` call, defaults omitted."""
     lines = [
@@ -152,6 +188,8 @@ def _family(entry: NetBoxObjectType) -> str:
         lines.append(f"        icon={_literal(entry.icon)},")
     if entry.base_query:
         lines.append(f"        base_query={_literal(entry.base_query)},")
+    if entry.binding is not None:
+        lines.append(f"        binding={_binding(entry.binding)},")
     lines.append("        attributes={")
     for name, attr in entry.attributes.items():
         lines.append(f"            {_literal(name)}: {_attribute(attr)},")

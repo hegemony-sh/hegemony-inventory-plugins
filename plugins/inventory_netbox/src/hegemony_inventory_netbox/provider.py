@@ -538,12 +538,35 @@ class NetBoxInventoryProvider(InventoryProvider):
         the scope indistinguishable from one that does not exist. Unscoped families keep
         the cheaper direct read.
         """
+        if plan.mapping.identity != "id":
+            # The row is stored under a natural key -- a site under its slug -- and
+            # NetBox's detail route is keyed by its primary key, so reading the id
+            # straight back would 404 on every object of that family. The list endpoint
+            # takes the key as a filter, which is the same route a scoped family uses.
+            return await self._single_match(
+                plan, {plan.mapping.identity: identifier}, identifier, context
+            )
         if not self._object_scope(plan):
             return await self._request_json(
                 f"{plan.endpoint}{quote(identifier, safe='')}/", context
             )
+        return await self._single_match(plan, {"id": identifier}, identifier, context)
+
+    async def _single_match(
+        self,
+        plan: _FetchPlan,
+        query: dict[str, str],
+        identifier: str,
+        context: ProviderCallContext,
+    ) -> dict[str, Any]:
+        """The one object matching ``query``, or NOT_FOUND.
+
+        Going through the filtered list endpoint is what keeps a scoped provider from
+        answering for an object outside its scope: the filter is applied, so an object
+        another provider can see is indistinguishable from one that does not exist.
+        """
         matches = await self._paginated(
-            self._object_path(plan, _query_to_expr({"id": identifier})),
+            self._object_path(plan, _query_to_expr(query)),
             context,
             page_limit=self._services.limits.max_provider_pages,
             # `id` is NetBox's primary key, so at most one row can match; asking for two
@@ -619,6 +642,11 @@ class NetBoxInventoryProvider(InventoryProvider):
             source_version=derived.source_version,
             object_types=tuple(entry.spec for entry in catalogue),
             mappings={entry.id: entry.mapping for entry in catalogue},
+            # Which of those families the platform's devices and sites are written from.
+            # Sent only for families this instance actually serves, so an instance that
+            # does not serve regions simply gets a flat site list rather than a binding
+            # that projects from rows which never arrive.
+            bindings=tuple(entry.binding for entry in catalogue if entry.binding is not None),
             warnings=(
                 *derived.warnings,
                 *(

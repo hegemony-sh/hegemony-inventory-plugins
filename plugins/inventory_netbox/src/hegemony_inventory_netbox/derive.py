@@ -57,8 +57,7 @@ from hegemony_inventory_sdk import RelationshipMapping
 
 from .catalogue_model import Attr, NetBoxObjectType, qualified_object_type_id
 from .overlay import (
-    CORE_CONTRACT_IDS,
-    DEFAULT_EDGE_KEY,
+    DEFAULT_EXTERNAL_ID_KEY,
     DEFAULT_OVERLAY,
     REGISTERED_IDS_BY_DERIVED,
     Overlay,
@@ -430,9 +429,9 @@ def derive_catalogue(
         by_component.setdefault(_undecorated(family.component), family.id)
     by_endpoint = {family.endpoint: family.id for family in families}
     # The overlay names endpoints; edges name derived ids. Translate once.
-    edge_keys = {
+    external_id_keys = {
         by_endpoint[endpoint]: key
-        for endpoint, key in overlay.edge_keys.items()
+        for endpoint, key in overlay.external_id_keys.items()
         if endpoint in by_endpoint
     }
     custom_fields = tuple(custom_fields)
@@ -447,7 +446,7 @@ def derive_catalogue(
                 overlay,
                 by_component,
                 by_endpoint,
-                edge_keys,
+                external_id_keys,
                 custom_fields,
                 warnings,
             )
@@ -468,7 +467,7 @@ def _derive_family(
     overlay: Overlay,
     by_component: Mapping[str, str],
     by_endpoint: Mapping[str, str],
-    edge_keys: Mapping[str, str],
+    external_id_keys: Mapping[str, str],
     custom_fields: Sequence[Mapping[str, Any]],
     warnings: list[str],
 ) -> NetBoxObjectType:
@@ -481,7 +480,7 @@ def _derive_family(
         if _is_noise(name) and (family.endpoint, name) not in overlay.keep_properties:
             continue
         attr, edge = _derive_property(
-            name, prop, family, index, overlay, by_component, edge_keys, warnings
+            name, prop, family, index, overlay, by_component, external_id_keys, warnings
         )
         if attr is not None:
             attributes[name] = attr
@@ -513,7 +512,7 @@ def _derive_family(
         # object arrives with the name of what it points at and no way to reach it.
         target = by_endpoint.get(pair.legacy_target or "")
         if target is not None:
-            edge_key = edge_keys.get(target, DEFAULT_EDGE_KEY)
+            edge_key = external_id_keys.get(target, DEFAULT_EXTERNAL_ID_KEY)
             relationships.append(
                 RelationshipMapping(
                     rel=pair.legacy,
@@ -521,6 +520,9 @@ def _derive_family(
                     source=f"{pair.legacy}.{edge_key}",
                 )
             )
+
+    for name, path in overlay.extra_attributes.get(family.endpoint, {}).items():
+        attributes.setdefault(name, Attr(path))
 
     attributes.update(
         custom_field_attributes(custom_fields, content_type=family.content_type(overlay))
@@ -533,6 +535,10 @@ def _derive_family(
     # same rule that reads a reference's natural key answers it here too.
     natural = index.natural_key(family.component)
     name_field = natural if natural in attributes else "display"
+    # One key for storing a row and for citing it. A family stored under its numeric id
+    # while every edge into it cites its slug is two keys for one thing, which is exactly
+    # the shape of the defect that started this work.
+    external_id_key = external_id_keys.get(family.id, DEFAULT_EXTERNAL_ID_KEY)
     return NetBoxObjectType(
         id=family.id,
         app=family.app,
@@ -541,6 +547,9 @@ def _derive_family(
         plural=(presentation.plural if presentation else None) or _titleize(family.segment),
         description=(presentation.description if presentation else None) or _describe(family),
         name_field=name_field,
+        identity=external_id_key,
+        identity_keys=(external_id_key,),
+        binding=overlay.bindings.get(family.endpoint),
         attributes=attributes,
         columns=(presentation.columns if presentation else ())
         or _default_columns(attributes, natural, replaced, generic_refs),
@@ -558,7 +567,7 @@ def _derive_property(
     index: _SchemaIndex,
     overlay: Overlay,
     by_component: Mapping[str, str],
-    edge_keys: Mapping[str, str],
+    external_id_keys: Mapping[str, str],
     warnings: list[str],
 ) -> tuple[Attr | None, RelationshipMapping | None]:
     nullable = bool(prop.get("nullable"))
@@ -575,7 +584,7 @@ def _derive_property(
         # The attribute stores what a person reads; the edge has to cite the target's
         # external id, which is the key the platform stored it under. They are usually
         # different properties of the same reference.
-        edge_key = edge_keys.get(target, DEFAULT_EDGE_KEY)
+        edge_key = external_id_keys.get(target, DEFAULT_EXTERNAL_ID_KEY)
         edge = RelationshipMapping(rel=name, target_object_type=target, source=f"{name}.{edge_key}")
         return Attr(path, json_type, nullable), edge
 
@@ -759,9 +768,9 @@ def _stale_overlay_warnings(overlay: Overlay, endpoints: frozenset[str] | set[st
     for endpoint, _name in (*overlay.untyped_paths, *overlay.untyped_objects):
         if endpoint not in endpoints:
             warnings.append(f"overlay declares a generic-reference path for unknown {endpoint}")
-    for endpoint in overlay.edge_keys:
+    for endpoint in overlay.external_id_keys:
         if endpoint not in endpoints:
-            warnings.append(f"overlay declares an edge key for unknown endpoint {endpoint}")
+            warnings.append(f"overlay declares an external id key for unknown endpoint {endpoint}")
     for endpoint in overlay.presentation:
         if endpoint not in endpoints:
             warnings.append(f"overlay declares presentation for unknown endpoint {endpoint}")
@@ -852,13 +861,16 @@ def registered_catalogue(derived: DerivedCatalogue) -> tuple[NetBoxObjectType, .
     does not -- a later release's, a NetBox plugin's -- arrive under the derived one.
     Relationship targets are re-keyed the same way, or an edge would point at an id
     nothing serves. :data:`~.overlay.REGISTERED_IDS` is the table both use.
+
+    Devices and sites are in here like anything else. They used to be left out, because
+    the platform read them through its own contract and offering them again would have
+    stored every device twice under two different keys. Projection is what changes that:
+    they are read once, as families, and the devices and sites tables are written from
+    the stored rows. :data:`~.overlay.BINDINGS` is what says which is which.
     """
     renamed = REGISTERED_IDS_BY_DERIVED
-    contract = frozenset(CORE_CONTRACT_IDS)
     catalogue: list[NetBoxObjectType] = []
     for entry in derived.object_types:
-        if entry.endpoint in contract:
-            continue
         relationships = tuple(
             RelationshipMapping(
                 rel=edge.rel,

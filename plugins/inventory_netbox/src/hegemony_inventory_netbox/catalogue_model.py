@@ -31,6 +31,7 @@ from hegemony_inventory_sdk import (
     ObjectTypeRelationshipSpec,
     ObjectTypeSpec,
     ObjectTypeUIHints,
+    ProjectionBinding,
     RelationshipMapping,
 )
 
@@ -156,6 +157,9 @@ class NetBoxObjectType:
     relationships: tuple[RelationshipMapping, ...] = ()
     #: Extra NetBox filter always applied to this family, on top of any configured one.
     base_query: str = ""
+    #: How this family becomes a platform device or site, when it is one. ``None`` for
+    #: every family that is only ever a generic object, which is almost all of them.
+    binding: ProjectionBinding | None = None
 
     @property
     def qualified_id(self) -> str:

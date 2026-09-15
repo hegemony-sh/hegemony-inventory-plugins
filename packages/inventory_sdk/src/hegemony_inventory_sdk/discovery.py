@@ -24,7 +24,74 @@ from dataclasses import dataclass, field
 from .mapping import ObjectFieldMapping
 from .objecttype import ObjectTypeSpec
 
-__all__ = ["DiscoveryResult"]
+__all__ = ["DiscoveryResult", "ProjectionBinding"]
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionBinding:
+    """Which stored object family becomes a platform device or site, and how.
+
+    The platform has two first-class tables -- devices and sites -- and they are what
+    runs target, what the site tree groups, and what an operator picks in a run form.
+    Everything else is a generic object. A provider that serves devices as a family like
+    any other says so here, and the platform *projects* the stored rows onto those
+    tables instead of asking for them a second time through ``query_devices`` and
+    ``list_sites``.
+
+    Reading the stored objects rather than the source twice is the point. Today a NetBox
+    device arrives once as a device and its nested site arrives again as a site, keyed a
+    second way, which is how one NetBox site came to exist as two platform rows. There is
+    nothing to keep consistent if there is only one read.
+
+    Paths are dotted and read the stored object's ``attributes``; ``*_edge`` names a
+    relationship the object already carries, so a site's parent is a real edge to a real
+    region rather than a name to be matched up later.
+    """
+
+    #: ``"device"`` or ``"site"``: the platform table these objects become.
+    target: str
+    #: The stored object family to read.
+    object_type: str
+    #: Attribute path for the row's name. Defaults to the object's own name.
+    name: str | None = None
+    #: Device only: management address, vendor, model, platform and serial.
+    hostname: str | None = None
+    vendor: str | None = None
+    model: str | None = None
+    platform: str | None = None
+    serial: str | None = None
+    #: Device only: the relationship that reaches this device's site.
+    site_edge: str | None = None
+    #: Site only: the relationship that reaches this row's parent. The parent may be in
+    #: another family -- a NetBox site's parent is a region -- so long as that family is
+    #: bound onto sites too, which is how a hierarchy that lives elsewhere becomes the
+    #: platform's site tree.
+    parent_edge: str | None = None
+    #: Prefix for the projected row's external id.
+    #:
+    #: The platform keys a site on ``(provider_id, external_id)``, and more than one
+    #: family can land in the sites table: NetBox sites nest under NetBox regions, and
+    #: both become site rows. Slugs are unique per model and not across them, so a region
+    #: and a site may both be ``gondor`` -- unprefixed they collide into one row that is
+    #: its own parent. A prefix per family makes that impossible rather than unlikely.
+    external_id_prefix: str = ""
+    #: Attribute path whose value maps onto a maintenance state, with the map.
+    maintenance_state: str | None = None
+    maintenance_state_map: Mapping[str, str] = field(default_factory=dict)
+    #: Attribute paths for access-config secret references, by dotted config key.
+    secret_refs: Mapping[str, str] = field(default_factory=dict)
+    #: Attribute paths copied into the row's tags, by tag key.
+    tags: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.target not in ("device", "site"):
+            raise ValueError(
+                f"ProjectionBinding target must be 'device' or 'site': {self.target!r}"
+            )
+        if self.target == "site" and (self.hostname or self.site_edge):
+            raise ValueError("ProjectionBinding: a site has no hostname and no site edge")
+        if self.target == "device" and self.parent_edge:
+            raise ValueError("ProjectionBinding: a device has no parent edge; use site_edge")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +115,11 @@ class DiscoveryResult:
     source_version: str | None = None
     object_types: tuple[ObjectTypeSpec, ...] = ()
     mappings: Mapping[str, ObjectFieldMapping] = field(default_factory=dict)
+    #: Which of those families are the platform's devices and sites. Empty means this
+    #: provider still answers ``query_devices`` and ``list_sites`` itself, which is what
+    #: every provider did before projection existed and what a provider that has not
+    #: been changed keeps doing.
+    bindings: tuple[ProjectionBinding, ...] = ()
     #: Shapes the provider could not interpret. Never fatal -- the family is simply not
     #: offered -- but each one is something this instance serves and the plugin does not
     #: yet understand, which is how a new release or plugin model gets noticed.
@@ -62,4 +134,32 @@ class DiscoveryResult:
             raise ValueError(
                 "DiscoveryResult object_types and mappings must describe the same "
                 f"object types; these appear in only one: {missing}"
+            )
+        # A binding on a family nobody described projects from rows that never arrive.
+        unbound = sorted(
+            binding.object_type for binding in self.bindings if binding.object_type not in declared
+        )
+        if unbound:
+            raise ValueError(
+                "DiscoveryResult binds object types it does not declare, so nothing "
+                f"would ever be projected from them: {unbound}"
+            )
+        families = [binding.object_type for binding in self.bindings]
+        if len(set(families)) != len(families):
+            raise ValueError(
+                "DiscoveryResult binds one object type more than once; its rows would be "
+                "projected twice and keep whichever binding ran last"
+            )
+        # Several families may become sites -- that is how a hierarchy living in another
+        # family becomes the site tree -- but only one can become devices: a device row
+        # written from two families keeps whichever ran last.
+        if len([binding for binding in self.bindings if binding.target == "device"]) > 1:
+            raise ValueError("DiscoveryResult binds more than one object type onto devices")
+        prefixes = [
+            binding.external_id_prefix for binding in self.bindings if binding.target == "site"
+        ]
+        if len(set(prefixes)) != len(prefixes):
+            raise ValueError(
+                "DiscoveryResult binds two object types onto sites under the same external "
+                "id prefix; their rows would collide on (provider_id, external_id)"
             )

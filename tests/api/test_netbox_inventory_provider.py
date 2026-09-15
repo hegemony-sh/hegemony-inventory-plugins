@@ -1587,7 +1587,12 @@ async def test_a_discovering_connection_test_reports_what_the_instance_serves(
     assert result.ok is True
     assert result.safe_details["netbox_full_version"] == "4.3.0-Docker-3.3.0"
     assert result.safe_details["netbox_families_offered"] == len(catalogue.OBJECT_TYPES)
-    assert result.safe_details["netbox_families_undeclared"] > 0
+    # Nothing undeclared, and that is the seed being complete rather than the report
+    # being broken: the shipped catalogue is generated from this very schema, so a stock
+    # 4.3 serves exactly what it offers. An instance with a NetBox plugin installed, or
+    # on a later release, is where this becomes non-zero -- which is the number's job.
+    assert result.safe_details["netbox_families_undeclared"] == 0
+    assert "netbox_families_missing" not in result.safe_details
     assert result.safe_details["netbox_custom_fields"] == 1
     # A stock 4.3 serves every family the catalogue offers and no shape it cannot read.
     assert "netbox_families_missing" not in result.safe_details

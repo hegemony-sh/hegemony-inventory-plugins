@@ -26,6 +26,7 @@ from hegemony_inventory_netbox import (
     register,
 )
 from hegemony_inventory_netbox.config import NetBoxProviderConfig
+from hegemony_inventory_netbox.overlay import EXTERNAL_ID_KEYS
 from hegemony_inventory_netbox.provider import NetBoxInventoryProvider
 from hegemony_inventory_sdk import (
     InventoryProviderError,
@@ -123,11 +124,23 @@ class _RecordingRegistry:
 def test_every_catalogue_entry_is_well_formed(entry: catalogue.NetBoxObjectType) -> None:
     """One entry, checked the way a reader would check it before trusting it."""
     assert _OBJECT_TYPE_ID.match(entry.id), entry.id
-    assert entry.id not in _CORE_RESOURCES, "devices and sites have their own contract"
+    if entry.id in _CORE_RESOURCES:
+        # Devices and sites are families like any other now, and that is only safe
+        # because they carry a projection binding: it is what says the stored rows
+        # become the platform's devices and sites tables rather than a second, parallel
+        # copy of them under a generic object type.
+        assert entry.binding is not None, (
+            f"{entry.id} is in the catalogue without a binding, so its rows would be "
+            "stored as generic objects and never reach the table they belong in"
+        )
     assert _ENDPOINT.match(entry.endpoint), entry.endpoint
-    # Every NetBox object has a numeric primary key, and it is what related objects
-    # cite, so it is the only identity that works for every family.
-    assert entry.identity == "id"
+    # A family is stored under one key and cited by the same one. NetBox's numeric
+    # primary key is what every family has and what every reference carries, so it is
+    # the default; a family that overrides it must say so in the overlay, and both
+    # spellings then come from there. Storing a row under one key while every edge into
+    # it cites another is the shape of the defect all of this exists to remove.
+    assert entry.identity == EXTERNAL_ID_KEYS.get(entry.endpoint, "id"), entry.id
+    assert entry.identity_keys == (entry.identity,)
     assert entry.display_name and entry.plural and entry.description
     assert entry.attributes, "a family with no attributes stores nothing worth listing"
 

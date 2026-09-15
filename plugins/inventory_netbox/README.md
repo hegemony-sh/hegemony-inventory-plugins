@@ -258,14 +258,14 @@ caller that happens to know its id.
 
 <!-- begin generated catalogue -->
 
-102 families across 8 NetBox apps. Each family carries its
+104 families across 8 NetBox apps. Each family carries its
 app as its `ObjectTypeSpec.group`, which is how the platform's *Object types to
 sync* selection shows them as a tree rather than a hundred flat checkboxes.
 
 | NetBox app | Families |
 | --- | --- |
 | `circuits` | `circuit`, `circuit_provider`, `circuit_termination`, `circuit_type`, `circuits.circuit_group_assignments`, `circuits.circuit_groups`, `circuits.provider_accounts`, `circuits.virtual_circuit_terminations`, `circuits.virtual_circuit_types`, `circuits.virtual_circuits`, `provider_network` |
-| `dcim` | `cable`, `console_port`, `dcim.cable_terminations`, `dcim.console_port_templates`, `dcim.console_server_port_templates`, `dcim.console_server_ports`, `dcim.device_bay_templates`, `dcim.device_bays`, `dcim.front_port_templates`, `dcim.interface_templates`, `dcim.inventory_item_roles`, `dcim.inventory_item_templates`, `dcim.mac_addresses`, `dcim.module_bay_templates`, `dcim.module_bays`, `dcim.module_type_profiles`, `dcim.power_outlet_templates`, `dcim.power_port_templates`, `dcim.rack_reservations`, `dcim.rack_roles`, `dcim.rack_types`, `dcim.rear_port_templates`, `dcim.regions`, `dcim.site_groups`, `device_role`, `device_type`, `front_port`, `interface`, `inventory_item`, `location`, `manufacturer`, `module`, `module_type`, `platform`, `power_feed`, `power_outlet`, `power_panel`, `power_port`, `rack`, `rear_port`, `virtual_chassis`, `virtual_device_context` |
+| `dcim` | `cable`, `console_port`, `dcim.cable_terminations`, `dcim.console_port_templates`, `dcim.console_server_port_templates`, `dcim.console_server_ports`, `dcim.device_bay_templates`, `dcim.device_bays`, `dcim.front_port_templates`, `dcim.interface_templates`, `dcim.inventory_item_roles`, `dcim.inventory_item_templates`, `dcim.mac_addresses`, `dcim.module_bay_templates`, `dcim.module_bays`, `dcim.module_type_profiles`, `dcim.power_outlet_templates`, `dcim.power_port_templates`, `dcim.rack_reservations`, `dcim.rack_roles`, `dcim.rack_types`, `dcim.rear_port_templates`, `device`, `device_role`, `device_type`, `front_port`, `interface`, `inventory_item`, `location`, `manufacturer`, `module`, `module_type`, `platform`, `power_feed`, `power_outlet`, `power_panel`, `power_port`, `rack`, `rear_port`, `region`, `site`, `site_group`, `virtual_chassis`, `virtual_device_context` |
 | `extras` | `config_context`, `extras.config_templates`, `extras.object_types`, `extras.tagged_objects`, `extras.tags`, `journal_entry` |
 | `ipam` | `aggregate`, `asn`, `fhrp_group`, `ip_address`, `ip_prefix`, `ip_range`, `ipam.asn_ranges`, `ipam.fhrp_group_assignments`, `ipam.service_templates`, `ipam.vlan_translation_policies`, `ipam.vlan_translation_rules`, `ipam_role`, `rir`, `route_target`, `service`, `vlan`, `vlan_group`, `vrf` |
 | `tenancy` | `contact`, `tenancy.contact_assignments`, `tenancy.contact_groups`, `tenancy.contact_roles`, `tenant`, `tenant_group` |
