@@ -152,18 +152,38 @@ def test_no_derived_column_names_a_spelling_this_netbox_replaced() -> None:
     """A column costs screen space whether or not anything ever lands in it.
 
     The written catalogue had to be corrected for this by hand once, on ``ip_prefix``.
-    The rule makes it unrepeatable: search fields still carry both spellings, because
-    an absent one costs nothing there.
+    The rule makes it unrepeatable.
     """
-    for endpoint, legacy_attributes in DEFAULT_OVERLAY.legacy_attributes.items():
+    for endpoint, replaced in DEFAULT_OVERLAY.replaced_fields.items():
         derived = _BY_ENDPOINT[endpoint]
-        for legacy in legacy_attributes:
-            assert legacy.name in derived.attributes, (
-                f"{endpoint}: {legacy.name!r} is declared legacy but not mapped"
+        for field in replaced:
+            assert field.legacy in derived.attributes, (
+                f"{endpoint}: {field.legacy!r} is declared replaced but not mapped"
             )
-            assert legacy.name not in derived.columns, (
-                f"{endpoint}: {legacy.name!r} is a column a current NetBox never fills"
+            assert field.legacy not in derived.columns, (
+                f"{endpoint}: {field.legacy!r} is a column a current NetBox never fills"
             )
+
+
+def test_both_spellings_of_a_replaced_field_stay_searchable() -> None:
+    """The mirror of the column rule, and the reason the two share one table.
+
+    A search field costs no screen space and an absent attribute simply never matches,
+    so naming both keeps a value findable on either side of a rename. Naming one leaves
+    it unfindable on the other, which is how an interface stopped being searchable by
+    its MAC address.
+    """
+    for endpoint, replaced in DEFAULT_OVERLAY.replaced_fields.items():
+        derived = _BY_ENDPOINT[endpoint]
+        for field in replaced:
+            for spelling in (field.legacy, field.generic):
+                if spelling not in derived.attributes:
+                    continue
+                assert spelling in derived.search_fields, (
+                    f"{endpoint}: {spelling!r} is mapped but not searchable, so the "
+                    f"pair {field.legacy!r}/{field.generic!r} is findable on only one "
+                    "side of the rename"
+                )
 
 
 @pytest.mark.parametrize(
@@ -204,15 +224,67 @@ def test_a_nullable_choice_still_admits_null() -> None:
     assert attribute.schema == {"type": ["string", "null"], "enum": ["active", "offline", None]}
 
 
-def test_a_reference_becomes_an_edge_to_the_family_it_points_at() -> None:
+def test_an_edge_cites_the_external_id_even_where_the_attribute_does_not() -> None:
+    """An attribute and an edge want different things from the same reference.
+
+    The attribute stores what a person reads -- a VLAN's number, a site's slug. The edge
+    has to cite the target's external id, because that is the key the platform stored it
+    under and the only value that resolves back to it. Reading the natural key into both
+    produces edges that point at nothing.
+    """
     prefixes = {entry.id: entry for entry in _DERIVED.object_types}["ipam.prefixes"]
     edges = {edge.rel: (edge.target_object_type, edge.source) for edge in prefixes.relationships}
-    assert edges["tenant"] == ("tenancy.tenants", "tenant.slug")
-    assert edges["vlan"] == ("ipam.vlans", "vlan.vid")
+    assert prefixes.attributes["vlan"].path == "vlan.vid"
+    assert edges["vlan"] == ("ipam.vlans", "vlan.id")
+    # Sites are the exception: the platform materialises them through the site contract,
+    # which keys them on their slug.
+    assert edges["site"] == ("dcim.sites", "site.slug")
     assert all(
         edge.target_object_type in {entry.id for entry in _DERIVED.object_types}
         for edge in prefixes.relationships
     )
+
+
+def test_a_serializer_variant_still_resolves_to_the_family_it_renders() -> None:
+    """``/api/dcim/devices/`` returns ``DeviceWithConfigContext`` rows; every reference
+    to a device resolves to ``BriefDevice``. If the two do not meet, a device has
+    attributes and nothing pointing at it -- no interface, no port, no module.
+    """
+    interfaces = {entry.id: entry for entry in _DERIVED.object_types}["dcim.interfaces"]
+    edges = {edge.rel: (edge.target_object_type, edge.source) for edge in interfaces.relationships}
+    assert edges["device"] == ("dcim.devices", "device.id")
+    vm_interfaces = {entry.id: entry for entry in _DERIVED.object_types}[
+        "virtualization.interfaces"
+    ]
+    vm_edges = {edge.rel: edge.target_object_type for edge in vm_interfaces.relationships}
+    assert vm_edges["virtual_machine"] == "virtualization.virtual_machines"
+
+
+_CORE_CONTRACT_IDS = {"device": "dcim.devices", "site": "dcim.sites"}
+
+
+@pytest.mark.parametrize("entry", catalogue.OBJECT_TYPES, ids=lambda entry: entry.id)
+def test_the_deriver_reproduces_every_written_edge(entry: catalogue.NetBoxObjectType) -> None:
+    """Every written relationship comes back pointing at the same family by the same key.
+
+    Matched on target and source rather than on the edge's label: the written catalogue
+    names some edges after the type they reach (``tenant_group`` for the ``group``
+    property) while the deriver names them after the property, which is derivable and
+    disambiguated by the target. What has to agree is where the edge goes and what it
+    cites to get there.
+    """
+    derived = {
+        (edge.target_object_type, edge.source)
+        for edge in _BY_ENDPOINT[entry.endpoint].relationships
+    }
+    for relationship in entry.relationships:
+        target = catalogue.LEGACY_OBJECT_TYPE_IDS.get(
+            relationship.target_object_type
+        ) or _CORE_CONTRACT_IDS.get(relationship.target_object_type)
+        assert (target, relationship.source) in derived, (
+            f"{entry.id}.{relationship.rel} points at {target} via "
+            f"{relationship.source!r}; the deriver produced {sorted(derived)}"
+        )
 
 
 def test_denormalised_counters_are_dropped_unless_a_family_asks_for_one() -> None:

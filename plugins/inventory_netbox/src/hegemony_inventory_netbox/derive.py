@@ -56,7 +56,7 @@ from typing import Any
 from hegemony_inventory_sdk import RelationshipMapping
 
 from .object_types import Attr, NetBoxObjectType, qualified_object_type_id
-from .overlay import DEFAULT_OVERLAY, Overlay
+from .overlay import DEFAULT_EDGE_KEY, DEFAULT_OVERLAY, Overlay, ReplacedField
 
 __all__ = [
     "DerivedCatalogue",
@@ -79,6 +79,13 @@ _COUNT_SUFFIX = "_count"
 _COUNT_PREFIX = "count_"
 
 _SCALAR_TYPES: frozenset[str] = frozenset({"string", "integer", "number", "boolean"})
+
+#: Suffixes NetBox appends to a serializer's name without changing the model it renders.
+#: ``/api/dcim/devices/`` returns ``DeviceWithConfigContext`` rows, while every reference
+#: to a device resolves to ``BriefDevice`` -> ``Device``. Indexing a family under its
+#: undecorated name too is what lets the two meet; without it a device has attributes but
+#: no interfaces pointing at it.
+_SERIALIZER_SUFFIXES: tuple[str, ...] = ("WithConfigContext",)
 
 #: NetBox custom-field type -> JSON Schema type. ``object``/``multiobject`` fields hold a
 #: rendered reference rather than a scalar, so they keep their whole shape.
@@ -402,14 +409,33 @@ def derive_catalogue(
     """
     index = _SchemaIndex(schema, overlay)
     families = _list_families(schema, index, overlay)
-    by_component = {family.component: family.id for family in families}
+    by_component: dict[str, str] = {}
+    for family in families:
+        by_component[family.component] = family.id
+        by_component.setdefault(_undecorated(family.component), family.id)
+    by_endpoint = {family.endpoint: family.id for family in families}
+    # The overlay names endpoints; edges name derived ids. Translate once.
+    edge_keys = {
+        by_endpoint[endpoint]: key
+        for endpoint, key in overlay.edge_keys.items()
+        if endpoint in by_endpoint
+    }
     custom_fields = tuple(custom_fields)
 
     warnings: list[str] = []
     derived: list[NetBoxObjectType] = []
     for family in families:
         derived.append(
-            _derive_family(family, index, overlay, by_component, custom_fields, warnings)
+            _derive_family(
+                family,
+                index,
+                overlay,
+                by_component,
+                by_endpoint,
+                edge_keys,
+                custom_fields,
+                warnings,
+            )
         )
     warnings.extend(_stale_overlay_warnings(overlay, {family.endpoint for family in families}))
     info = schema.get("info")
@@ -426,6 +452,8 @@ def _derive_family(
     index: _SchemaIndex,
     overlay: Overlay,
     by_component: Mapping[str, str],
+    by_endpoint: Mapping[str, str],
+    edge_keys: Mapping[str, str],
     custom_fields: Sequence[Mapping[str, Any]],
     warnings: list[str],
 ) -> NetBoxObjectType:
@@ -437,21 +465,43 @@ def _derive_family(
             continue
         if _is_noise(name) and (family.endpoint, name) not in overlay.keep_properties:
             continue
-        attr, edge = _derive_property(name, prop, family, index, overlay, by_component, warnings)
+        attr, edge = _derive_property(
+            name, prop, family, index, overlay, by_component, edge_keys, warnings
+        )
         if attr is not None:
             attributes[name] = attr
         if edge is not None:
             relationships.append(edge)
 
-    legacy_names = {legacy.name for legacy in overlay.legacy_attributes.get(family.endpoint, ())}
-    for legacy in overlay.legacy_attributes.get(family.endpoint, ()):
-        if legacy.name in attributes:
+    replaced = overlay.replaced_fields.get(family.endpoint, ())
+    legacy_names = {pair.legacy for pair in replaced}
+    for pair in replaced:
+        if pair.legacy_path is None:
+            if pair.legacy not in attributes:
+                warnings.append(
+                    f"{family.endpoint}: {pair.legacy!r} is declared replaced with no path "
+                    "to read it by, and this schema does not serve it either"
+                )
+            continue
+        if pair.legacy in attributes:
             warnings.append(
-                f"{family.endpoint}: overlay declares legacy attribute {legacy.name!r}, "
-                "but this schema serves it -- the declaration is no longer needed"
+                f"{family.endpoint}: overlay gives {pair.legacy!r} a path to read it by, "
+                "but this schema serves it -- the path is no longer needed"
             )
             continue
-        attributes[legacy.name] = Attr(legacy.path, legacy.json_type)
+        attributes[pair.legacy] = Attr(pair.legacy_path, pair.legacy_type)
+        # A release that serves the legacy spelling should keep its edge too, or the
+        # object arrives with the name of what it points at and no way to reach it.
+        target = by_endpoint.get(pair.legacy_target or "")
+        if target is not None:
+            edge_key = edge_keys.get(target, DEFAULT_EDGE_KEY)
+            relationships.append(
+                RelationshipMapping(
+                    rel=pair.legacy,
+                    target_object_type=target,
+                    source=f"{pair.legacy}.{edge_key}",
+                )
+            )
 
     attributes.update(
         custom_field_attributes(custom_fields, content_type=family.content_type(overlay))
@@ -476,7 +526,7 @@ def _derive_family(
         columns=(presentation.columns if presentation else ())
         or _default_columns(attributes, natural, legacy_names),
         search_fields=(presentation.search_fields if presentation else ())
-        or _default_search_fields(attributes, natural),
+        or _default_search_fields(attributes, natural, replaced),
         icon=presentation.icon if presentation else None,
         relationships=tuple(relationships),
     )
@@ -489,6 +539,7 @@ def _derive_property(
     index: _SchemaIndex,
     overlay: Overlay,
     by_component: Mapping[str, str],
+    edge_keys: Mapping[str, str],
     warnings: list[str],
 ) -> tuple[Attr | None, RelationshipMapping | None]:
     nullable = bool(prop.get("nullable"))
@@ -497,14 +548,16 @@ def _derive_property(
     if component is not None:
         key = index.natural_key(component)
         key_type = index.properties(component).get(key, {}).get("type")
-        target = by_component.get(_dereferenced_family(component))
         path = f"{name}.{key}"
-        edge = (
-            RelationshipMapping(rel=name, target_object_type=target, source=path)
-            if target is not None
-            else None
-        )
         json_type = str(key_type) if key_type in _SCALAR_TYPES else "string"
+        target = by_component.get(_dereferenced_family(component))
+        if target is None:
+            return Attr(path, json_type, nullable), None
+        # The attribute stores what a person reads; the edge has to cite the target's
+        # external id, which is the key the platform stored it under. They are usually
+        # different properties of the same reference.
+        edge_key = edge_keys.get(target, DEFAULT_EDGE_KEY)
+        edge = RelationshipMapping(rel=name, target_object_type=target, source=f"{name}.{edge_key}")
         return Attr(path, json_type, nullable), edge
 
     choice = _choice(prop)
@@ -539,6 +592,14 @@ def _dereferenced_family(component: str) -> str:
     for prefix in ("Brief", "Nested"):
         if component.startswith(prefix):
             return component[len(prefix) :]
+    return component
+
+
+def _undecorated(component: str) -> str:
+    """``DeviceWithConfigContext`` names the same model as ``Device``."""
+    for suffix in _SERIALIZER_SUFFIXES:
+        if component.endswith(suffix) and component != suffix:
+            return component[: -len(suffix)]
     return component
 
 
@@ -586,21 +647,37 @@ def _default_columns(
     return tuple(chosen) or ("name",)
 
 
-def _default_search_fields(attributes: Mapping[str, Attr], natural: str) -> tuple[str, ...]:
+def _default_search_fields(
+    attributes: Mapping[str, Attr], natural: str, replaced: Sequence[ReplacedField]
+) -> tuple[str, ...]:
+    """Default search fields, carrying both spellings of anything NetBox replaced.
+
+    The mirror of :func:`_default_columns`. A search field costs no screen space and an
+    absent attribute simply never matches, so naming both spellings keeps a value
+    findable on either side of a rename while naming one leaves it unfindable on the
+    other -- which is how an interface stopped being searchable by MAC.
+    """
     chosen = [natural] if natural in attributes else []
     chosen += [name for name in _PREFERRED_SEARCH if name in attributes and name != natural]
+    for pair in replaced:
+        for spelling in (pair.legacy, pair.generic):
+            if spelling in attributes and spelling not in chosen:
+                chosen.append(spelling)
     return tuple(chosen) or ("name",)
 
 
 def _stale_overlay_warnings(overlay: Overlay, endpoints: frozenset[str] | set[str]) -> list[str]:
     """Overlay entries naming an endpoint this document does not serve."""
     warnings: list[str] = []
-    for endpoint, _ in overlay.legacy_attributes.items():
+    for endpoint in overlay.replaced_fields:
         if endpoint not in endpoints:
-            warnings.append(f"overlay declares legacy attributes for unknown endpoint {endpoint}")
+            warnings.append(f"overlay declares replaced fields for unknown endpoint {endpoint}")
     for endpoint, _name in (*overlay.untyped_paths, *overlay.untyped_objects):
         if endpoint not in endpoints:
             warnings.append(f"overlay declares a generic-reference path for unknown {endpoint}")
+    for endpoint in overlay.edge_keys:
+        if endpoint not in endpoints:
+            warnings.append(f"overlay declares an edge key for unknown endpoint {endpoint}")
     for endpoint in overlay.presentation:
         if endpoint not in endpoints:
             warnings.append(f"overlay declares presentation for unknown endpoint {endpoint}")

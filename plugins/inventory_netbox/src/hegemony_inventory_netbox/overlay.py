@@ -28,13 +28,19 @@ Five kinds of correction live here, and nothing else belongs:
     object is worth keeping. The same untyped shape is also how NetBox renders free-form
     JSON, which is why the two cases have to be told apart by hand.
 
-``LEGACY_ATTRIBUTES``
-    Spellings an older supported NetBox serves and a newer one does not. A schema
+``REPLACED_FIELDS``
+    Fields one supported NetBox release replaced with a generic equivalent. A schema
     describes one release; the shipped catalogue has to serve the supported range, so
-    the older spelling is declared rather than derived.
+    the pairs are declared rather than derived. This one table drives three rules --
+    which spelling is synthesised, which is kept out of the browse columns, and which
+    are searchable -- so the three cannot disagree.
 
 ``PRESENTATION``
     Browse columns and search fields where the derived default is poor.
+
+``EDGE_KEYS``
+    Which property identifies a family when something points at it, where that is not
+    its NetBox id.
 
 ``KEEP_PROPERTIES``
     Properties the deriver's noise rules drop that one family genuinely wants.
@@ -128,39 +134,66 @@ UNTYPED_OBJECTS: frozenset[tuple[str, str]] = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
-class LegacyAttribute:
-    """One spelling an older supported NetBox serves and the recorded schema does not."""
+class ReplacedField:
+    """One field a supported NetBox release replaced with a generic equivalent."""
 
-    name: str
-    path: str
-    json_type: str = "string"
-    #: The generic spelling that replaced it, for the reader and for the tests that
-    #: check the two stay declared together.
-    replaced_by: str | None = None
+    #: The pre-rename spelling.
+    legacy: str
+    #: What replaced it.
+    generic: str
+    #: Where to read the legacy spelling, for a release that serves it. ``None`` means
+    #: the recorded schema still serves the field itself, so nothing is synthesised --
+    #: the pair is declared only so both spellings stay searchable.
+    legacy_path: str | None = None
+    legacy_type: str = "string"
+    #: Endpoint of the family the legacy spelling points at, when it is a reference.
+    #: Without it a release serving the legacy field loses the edge as well as the name.
+    legacy_target: str | None = None
 
 
-#: Pre-rename spellings, by endpoint. NetBox 4.2 and 4.3 replaced each of these with a
-#: generic equivalent; a schema recorded from one release cannot describe the other, so
-#: the shipped catalogue declares both and the absent one simply maps to ``None``.
+#: Every field NetBox replaced, by endpoint.
 #:
-#: This is the same nine-pair set the catalogue tests pin as ``_VERSION_REPLACED_FIELDS``
-#: -- two of the nine differ only in which spelling is searchable, so they need no
-#: declaration here.
-LEGACY_ATTRIBUTES: Mapping[str, tuple[LegacyAttribute, ...]] = MappingProxyType(
+#: NetBox 4.2 and 4.3 replaced each of these with a generic equivalent, and this plugin
+#: supports both sides of the rename. A schema describes one release, so the pairs are
+#: declared here and three rules follow from them:
+#:
+#: * the legacy spelling is mapped, and its edge emitted, on a release that serves it;
+#: * no browse column ever names it, because a column costs screen space whether or not
+#:   anything lands in it;
+#: * both spellings stay searchable, because a search field costs nothing and an absent
+#:   attribute simply never matches.
+#:
+#: The last two are the asymmetry the plugin README sets out. Declaring the pairs once
+#: is what stops the three rules from drifting apart.
+REPLACED_FIELDS: Mapping[str, tuple[ReplacedField, ...]] = MappingProxyType(
     {
-        "/api/tenancy/contacts/": (LegacyAttribute("group", "group.name", replaced_by="groups"),),
-        "/api/ipam/prefixes/": (LegacyAttribute("site", "site.slug", replaced_by="scope"),),
-        "/api/ipam/services/": (
-            LegacyAttribute("device", "device.name", replaced_by="parent"),
-            LegacyAttribute("virtual_machine", "virtual_machine.name", replaced_by="parent"),
-        ),
-        "/api/virtualization/clusters/": (
-            LegacyAttribute("site", "site.slug", replaced_by="scope"),
-        ),
         "/api/circuits/circuit-terminations/": (
-            LegacyAttribute("site", "site.slug", replaced_by="termination"),
-            LegacyAttribute("provider_network", "provider_network.name", replaced_by="termination"),
+            ReplacedField("site", "termination", "site.slug", legacy_target="/api/dcim/sites/"),
+            ReplacedField(
+                "provider_network",
+                "termination",
+                "provider_network.name",
+                legacy_target="/api/circuits/provider-networks/",
+            ),
         ),
+        "/api/dcim/interfaces/": (ReplacedField("mac_address", "primary_mac_address"),),
+        "/api/ipam/prefixes/": (
+            ReplacedField("site", "scope", "site.slug", legacy_target="/api/dcim/sites/"),
+        ),
+        "/api/ipam/services/": (
+            ReplacedField("device", "parent", "device.name", legacy_target="/api/dcim/devices/"),
+            ReplacedField(
+                "virtual_machine",
+                "parent",
+                "virtual_machine.name",
+                legacy_target="/api/virtualization/virtual-machines/",
+            ),
+        ),
+        "/api/tenancy/contacts/": (ReplacedField("group", "groups", "group.name"),),
+        "/api/virtualization/clusters/": (
+            ReplacedField("site", "scope", "site.slug", legacy_target="/api/dcim/sites/"),
+        ),
+        "/api/virtualization/interfaces/": (ReplacedField("mac_address", "primary_mac_address"),),
     }
 )
 
@@ -175,6 +208,20 @@ class Presentation:
     display_name: str | None = None
     plural: str | None = None
     description: str | None = None
+
+
+#: Property to cite when pointing *at* a family, where it is not the NetBox id.
+#:
+#: An attribute and an edge want different things from the same reference. The attribute
+#: stores what a person reads -- a site's slug, a VLAN's number -- while an edge has to
+#: cite the target's **external id**, because that is the key the platform stored the
+#: target under and the only thing that will resolve back to it. For every NetBox family
+#: that is the numeric ``id``, which is why this table has one entry: the platform
+#: materialises sites through the site contract, which keys them on their slug.
+EDGE_KEYS: Mapping[str, str] = MappingProxyType({"/api/dcim/sites/": "slug"})
+
+#: The property every other family is cited by.
+DEFAULT_EDGE_KEY = "id"
 
 
 #: Django content-type label by endpoint, where the deriver's rule cannot reach it.
@@ -237,11 +284,12 @@ class Overlay:
     natural_keys: Mapping[str, str] = field(default_factory=lambda: NATURAL_KEYS)
     untyped_paths: Mapping[tuple[str, str], str] = field(default_factory=lambda: UNTYPED_PATHS)
     untyped_objects: frozenset[tuple[str, str]] = UNTYPED_OBJECTS
-    legacy_attributes: Mapping[str, tuple[LegacyAttribute, ...]] = field(
-        default_factory=lambda: LEGACY_ATTRIBUTES
+    replaced_fields: Mapping[str, tuple[ReplacedField, ...]] = field(
+        default_factory=lambda: REPLACED_FIELDS
     )
     presentation: Mapping[str, Presentation] = field(default_factory=dict)
     content_types: Mapping[str, str] = field(default_factory=lambda: CONTENT_TYPES)
+    edge_keys: Mapping[str, str] = field(default_factory=lambda: EDGE_KEYS)
     keep_properties: frozenset[tuple[str, str]] = KEEP_PROPERTIES
     skip_endpoints: frozenset[str] = SKIP_ENDPOINTS
 

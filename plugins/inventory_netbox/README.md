@@ -368,8 +368,9 @@ is right about the release in front of it rather than the release someone had in
 ### What the comparison proves
 
 `tests/api/test_netbox_derive.py` derives from a recorded NetBox 4.3 schema and checks
-every hand-written attribute against it. All 50 families and all 328 attributes come
-back with the same dotted path and the same type.
+the hand-written catalogue against it. All 50 families, all 328 attributes and all 51
+relationships come back: the same dotted path and type for every attribute, and the same
+target family and source key for every edge.
 
 Getting there found four defects in the written catalogue, all silent:
 
@@ -423,7 +424,8 @@ happens. The table is what makes that mechanical when it is worth doing.
 | `NATURAL_KEYS` | 7 | Which property of a referenced object to store. NetBox marks none of them. |
 | `UNTYPED_PATHS` | 17 | Generic references carry no type at all — `Prefix.scope` is `{"nullable": true, "readOnly": true}` and nothing more. |
 | `UNTYPED_OBJECTS` | 8 | Free-form JSON has the same untyped shape as a generic reference. |
-| `LEGACY_ATTRIBUTES` | 7 | A schema describes one release; the shipped catalogue serves a range. |
+| `REPLACED_FIELDS` | 9 | A schema describes one release; the shipped catalogue serves a range. |
+| `EDGE_KEYS` | 1 | Which property identifies a family when something points at it. |
 | `KEEP_PROPERTIES` | 1 | A virtual chassis's member count is the fact, not a counter about other objects. |
 | `CONTENT_TYPES` | 0 | Reserved: a NetBox plugin may name endpoints the singularisation rule cannot reach. |
 | `SKIP_ENDPOINTS` | 24 | NetBox's own plumbing is not inventory. |
@@ -432,6 +434,28 @@ Everything else is derived, including the rules the written catalogue had to be
 corrected into following: a derived browse column never names a legacy spelling, and a
 derived name field is the property someone *sets* rather than one NetBox computes, so a
 prefix is named by `prefix` and not by how many child prefixes it has.
+
+`REPLACED_FIELDS` is one table because the three rules that follow from it must not
+drift apart. From the same nine pairs the deriver decides which spelling to synthesise
+on a release that lacks it, which to keep out of the browse columns, and which to make
+searchable — both, always, because a search field costs no screen space and an absent
+attribute simply never matches.
+
+### An attribute and an edge want different things
+
+The same reference feeds two of them, and they disagree on purpose. The **attribute**
+stores what a person reads: a VLAN's number, a manufacturer's name, a site's slug. The
+**edge** has to cite the target's *external id*, because that is the key the platform
+stored the target under and the only value that resolves back to it. So a prefix's VLAN
+reads `vlan.vid` as an attribute and `vlan.id` as an edge. `EDGE_KEYS` holds the one
+exception: the platform materialises sites through the site contract, which keys them on
+their slug.
+
+One more thing has to line up for an edge to resolve at all. `/api/dcim/devices/` returns
+rows of a serializer NetBox calls `DeviceWithConfigContext`, while every reference *to* a
+device resolves to `BriefDevice`. The deriver indexes a family under its undecorated name
+as well, so the two meet; without that a device arrives with every attribute and nothing
+pointing at it — no interface, no port, no module.
 
 On a stock NetBox 4.3 the deriver emits **no warnings at all**, which is what makes a
 warning worth reading: it means that instance serves a shape the overlay has not seen —
