@@ -1395,3 +1395,95 @@ async def test_a_cyclic_hierarchy_does_not_hang_the_sync(
     listed = await _listed(provider)
 
     assert {"region:a", "region:b"} <= {site.external_id for site in listed}
+
+
+@pytest.mark.asyncio
+async def test_a_connection_test_asks_what_netbox_it_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/api/status/`` proves the token works and says which NetBox answered.
+
+    Listing one device proves no more -- both need a valid token -- and answers nothing
+    about the release or the plugins installed on it, which is exactly what an operator
+    wants to see when a sync returns something they did not expect.
+    """
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "netbox-version": "4.3.0",
+                "netbox-full-version": "4.3.0-Docker-3.3.0",
+                "plugins": {"netbox_dns": "1.1.4"},
+            },
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    result = await _provider(token="netbox-token").test_connection(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="test_connection",
+            query_hash="status",
+            config_version=1,
+        )
+    )
+
+    assert requested == ["/api/status/"]
+    assert result.ok is True
+    assert result.message == "NetBox 4.3.0-Docker-3.3.0 connection succeeded"
+    assert result.safe_details == {
+        "netbox_version": "4.3.0",
+        "netbox_full_version": "4.3.0-Docker-3.3.0",
+        "netbox_plugins": {"netbox_dns": "1.1.4"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_refused_connection_test_reports_the_error_and_no_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed probe learned nothing about the instance, so it claims nothing."""
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"detail": "Invalid token"})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    result = await _provider(token="wrong-token").test_connection(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="test_connection",
+            query_hash="status",
+            config_version=1,
+        )
+    )
+
+    assert result.ok is False
+    assert result.safe_details == {}
+    assert result.error is not None
+    assert result.error["code"] == ProviderErrorCode.AUTH_FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_a_netbox_that_answers_status_with_less_still_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy or an older release may reply with fewer keys; that is not a failure."""
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"django-version": "5.1.8"})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    result = await _provider(token="netbox-token").test_connection(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="test_connection",
+            query_hash="status",
+            config_version=1,
+        )
+    )
+
+    assert result.ok is True
+    assert result.message == "NetBox connection succeeded"
+    assert result.safe_details == {}

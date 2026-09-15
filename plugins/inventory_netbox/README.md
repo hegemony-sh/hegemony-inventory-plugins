@@ -444,6 +444,17 @@ attributes under `custom_fields.<name>`. This is the part no shipped catalogue c
 cover: every NetBox has custom fields, no two have the same ones, and the written
 catalogue maps not one of them.
 
+### The connection test says which NetBox answered
+
+Testing a provider now reads `/api/status/` rather than listing one device. Both need a
+valid token, but the status endpoint also reports the release and every installed
+plugin, and it returns a few hundred bytes rather than several megabytes. The result
+appears in the connection test's details as `netbox_version`, `netbox_full_version` and
+`netbox_plugins`.
+
+That is also the cheap half of discovery: a schema is only valid for the version that
+produced it, so the version is what you ask for first.
+
 ### Regenerating the fixture
 
 `tests/fixtures/netbox-4.3-schema.json` is a real document, reduced to what the deriver

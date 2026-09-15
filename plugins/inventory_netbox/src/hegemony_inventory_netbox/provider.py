@@ -36,6 +36,7 @@ from hegemony_inventory_sdk import (
 )
 
 from .config import DEFAULT_FIELD_MAP, NetBoxProviderConfig
+from .derive import SourceStatus, read_status
 from .object_types import ALL_OBJECT_TYPE_IDS, NetBoxObjectType, sources_for
 
 KNOWN_AUTH_SCHEMES = frozenset({"bearer", "token", "basic"})
@@ -506,13 +507,26 @@ class NetBoxInventoryProvider(InventoryProvider):
         return matches[0]
 
     async def test_connection(self, *, context: ProviderCallContext) -> ProviderTestResult:
+        """Check the connection, and report what is on the other end of it.
+
+        ``/api/status/`` is the cheapest authenticated endpoint NetBox serves and the
+        most informative: a few hundred bytes carrying the release and every installed
+        plugin. Listing one device proves no more -- both need a valid token -- and
+        answers nothing about *which* NetBox this is, which is the question an operator
+        asks when a sync returns something they did not expect.
+        """
         start = monotonic()
+        status = SourceStatus()
         try:
             await self._services.validate_url(str(self.config.url), operation="test_connection")
-            await self._request_json("/api/dcim/devices/?limit=1", context)
+            status = read_status(await self._request_json("/api/status/", context))
             ok = True
             error = None
-            message = "NetBox connection succeeded"
+            message = (
+                f"NetBox {status.full_version} connection succeeded"
+                if status.full_version
+                else "NetBox connection succeeded"
+            )
         except InventoryProviderError as exc:
             ok = False
             error = exc.envelope.to_dict()
@@ -524,6 +538,7 @@ class NetBoxInventoryProvider(InventoryProvider):
             latency_ms=int((monotonic() - start) * 1000),
             message=message,
             error=error,
+            safe_details=status.safe_details,
         )
 
     async def _request_json(self, path_or_url: str, context: ProviderCallContext) -> dict[str, Any]:
