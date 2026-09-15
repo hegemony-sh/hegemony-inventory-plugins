@@ -22,6 +22,7 @@ from hegemony_inventory_sdk import (
     Capability,
     InventoryProviderError,
     MaintenanceState,
+    ObjectFieldMapping,
     ProviderCallContext,
     ProviderErrorCode,
     ResourceType,
@@ -1716,3 +1717,95 @@ async def test_discovery_raises_where_the_connection_test_stays_quiet(
 
 def test_the_netbox_provider_declares_the_capability_it_implements() -> None:
     assert Capability.DISCOVER in _provider().capabilities
+
+
+@pytest.mark.asyncio
+async def test_netbox_reads_a_family_only_the_instance_knows_about(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NetBox plugin's model is readable although no catalogue has ever named it.
+
+    This is the payoff of discovery and the one thing a shipped catalogue can never do:
+    ``netbox_dns.records`` exists on one operator's NetBox and nowhere else. The provider
+    is built fresh for the call and has never heard of it, so everything it needs --
+    where to fetch it and how to read a record -- arrives on the call context, exactly as
+    the platform stored it when the instance described itself.
+    """
+    paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(
+            str(request.url.path) + ("?" + request.url.query.decode() if request.url.query else "")
+        )
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": 12,
+                        "name": "www",
+                        "zone": {"name": "example.com"},
+                        "type": "A",
+                        "value": "10.0.0.8",
+                    }
+                ],
+                "next": None,
+            },
+        )
+
+    provider = _provider(token="netbox-token")
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    mapping = ObjectFieldMapping(
+        object_type="netbox_dns.records",
+        identity="id",
+        name_field="name",
+        field_map={"name": "name", "zone": "zone.name", "type": "type", "value": "value"},
+        source={"endpoint": "/api/plugins/netbox-dns/records/"},
+    )
+    objects = await provider.list_objects(
+        "netbox_dns.records",
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="auto_sync_objects:netbox_dns.records",
+            object_mapping=mapping,
+        ),
+    )
+
+    assert paths == ["/api/plugins/netbox-dns/records/"]
+    (record,) = objects
+    assert (record.object_type, record.external_id, record.name) == (
+        "netbox_dns.records",
+        "12",
+        "www",
+    )
+    assert record.attributes == {
+        "name": "www",
+        "zone": "example.com",
+        "type": "A",
+        "value": "10.0.0.8",
+    }
+
+
+@pytest.mark.asyncio
+async def test_netbox_refuses_a_family_nothing_has_described(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a mapping there is nowhere to read from, and the provider says so.
+
+    The counterpart of the previous test: being handed nothing must not become a guess
+    at an endpoint. A family the catalogue does not carry and the platform cannot
+    describe falls through to the SDK default, which reports that it is not supported.
+    """
+    provider = _provider(token="netbox-token")
+    _install_transport(monkeypatch, httpx.MockTransport(lambda request: httpx.Response(200)))
+
+    with pytest.raises(InventoryProviderError) as raised:
+        await provider.list_objects(
+            "netbox_dns.records",
+            context=ProviderCallContext(
+                provider_id="netbox:primary",
+                operation="auto_sync_objects:netbox_dns.records",
+            ),
+        )
+    assert raised.value.envelope.code == ProviderErrorCode.MALFORMED_QUERY

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from time import monotonic
 from typing import Any
 from urllib.parse import ParseResult, quote, urlencode, urljoin, urlparse
@@ -24,6 +24,7 @@ from hegemony_inventory_sdk import (
     InventoryProviderError,
     MaintenanceState,
     ObjectDescriptor,
+    ObjectFieldMapping,
     PlatformServices,
     ProviderCallContext,
     ProviderErrorCode,
@@ -126,6 +127,22 @@ _SITE_TREE_SOURCES: dict[str, tuple[str, str, str, str]] = {
     "region": ("region", "/api/dcim/regions/", "region:", "region"),
     "site_group": ("group", "/api/dcim/site-groups/", "site-group:", "site_group"),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class _FetchPlan:
+    """Everything needed to read one NetBox family: where it lives and how to map it.
+
+    A catalogue family fills this from the catalogue. A family the instance *discovered*
+    fills it from the mapping the platform hands back, which is the only place that
+    knowledge survives -- the provider is built fresh per operation and the catalogue
+    never knew the family in the first place.
+    """
+
+    object_type: str
+    endpoint: str
+    mapping: ObjectFieldMapping
+    base_query: str = ""
 
 
 class NetBoxInventoryProvider(InventoryProvider):
@@ -405,6 +422,31 @@ class NetBoxInventoryProvider(InventoryProvider):
             descriptive=descriptive,
         )
 
+    def _fetch_plan(self, object_type: str, context: ProviderCallContext) -> _FetchPlan | None:
+        """How to read ``object_type``, from the catalogue or from the platform.
+
+        A family in the shipped catalogue is read from the catalogue, which is every
+        family on a provider that has never discovered anything. A family this instance
+        *discovered* is not in the catalogue -- that is what discovering it means -- and
+        this provider is built fresh for the call and remembers nothing, so the platform
+        hands back the mapping discovery returned, endpoint and all.
+
+        ``None`` for anything neither knows: device and site, which have their own
+        contract, and a family nobody has ever described.
+        """
+        source = self._object_sources.get(object_type)
+        if source is not None:
+            return _FetchPlan(object_type, source.endpoint, source.mapping, source.base_query)
+        mapping = context.object_mapping
+        if mapping is None:
+            return None
+        endpoint = mapping.source.get("endpoint", "")
+        if not endpoint:
+            # A mapping with nowhere to read from cannot be acted on. Falling through to
+            # the SDK default reports "not supported", which is what it is.
+            return None
+        return _FetchPlan(object_type, endpoint, mapping, mapping.source.get("base_query", ""))
+
     async def list_objects(
         self,
         object_type: str,
@@ -414,8 +456,8 @@ class NetBoxInventoryProvider(InventoryProvider):
         cursor: str | None = None,
         context: ProviderCallContext,
     ) -> builtins.list[ObjectDescriptor]:
-        source = self._object_sources.get(object_type)
-        if source is None:
+        plan = self._fetch_plan(object_type, context)
+        if plan is None:
             # device/site (and a family this provider is not configured to read) fall
             # back to the SDK default, which delegates to query_devices/list_sites or
             # raises "not supported".
@@ -423,7 +465,7 @@ class NetBoxInventoryProvider(InventoryProvider):
                 object_type, query, limit=limit, cursor=cursor, context=context
             )
         items = await self._paginated(
-            self._object_path(source, _query_to_expr(query)),
+            self._object_path(plan, _query_to_expr(query)),
             context,
             page_limit=self._services.limits.max_provider_pages,
             result_limit=limit or self._services.limits.max_run_targets,
@@ -431,27 +473,29 @@ class NetBoxInventoryProvider(InventoryProvider):
         return [
             self._with_provider_url(descriptor, item)
             for descriptor, item in zip(
-                map_records(items, source.mapping, provider_id=self.id), items, strict=True
+                map_records(items, plan.mapping, provider_id=self.id), items, strict=True
             )
         ]
 
-    def _object_scope(self, source: NetBoxObjectType) -> str:
+    def _object_scope(self, plan: _FetchPlan) -> str:
         """The filter this provider always applies to a family, built in and configured.
 
         This is the whole of what a provider is allowed to see of a family, so every read
-        of it -- a list or a single object -- has to go through this.
+        of it -- a list or a single object -- has to go through this. A discovered family
+        is scoped the same way: ``object_queries`` is keyed by object type, and a
+        discovered type has one like any other.
         """
-        configured = self.config.object_queries.get(source.id, "")
-        return "&".join(part for part in (source.base_query, configured) if part)
+        configured = self.config.object_queries.get(plan.object_type, "")
+        return "&".join(part for part in (plan.base_query, configured) if part)
 
-    def _object_path(self, source: NetBoxObjectType, expr: str) -> str:
+    def _object_path(self, plan: _FetchPlan, expr: str) -> str:
         """The endpoint for one family, scoped by its configured and caller filters.
 
         Same shape as ``device_query``: the configured baseline narrows every read of
         the family, a caller expression is appended, and NetBox ANDs the two.
         """
-        parts = [part for part in (self._object_scope(source), expr.lstrip("?")) if part]
-        return f"{source.endpoint}?{'&'.join(parts)}" if parts else source.endpoint
+        parts = [part for part in (self._object_scope(plan), expr.lstrip("?")) if part]
+        return f"{plan.endpoint}?{'&'.join(parts)}" if parts else plan.endpoint
 
     async def get_object(
         self,
@@ -466,8 +510,8 @@ class NetBoxInventoryProvider(InventoryProvider):
         generic families fell through to the SDK default, which only knows device and
         site, so every object detail page raised "not supported".
         """
-        source = self._object_sources.get(object_type)
-        if source is None:
+        plan = self._fetch_plan(object_type, context)
+        if plan is None:
             return await super().get_object(object_type, external_id, context=context)
         identifier = str(external_id).strip()
         if not identifier:
@@ -476,13 +520,13 @@ class NetBoxInventoryProvider(InventoryProvider):
                 "NetBox object id is empty",
                 context.operation,
             )
-        payload = await self._object_payload(source, identifier, context)
+        payload = await self._object_payload(plan, identifier, context)
         return self._with_provider_url(
-            map_record(payload, source.mapping, provider_id=self.id), payload
+            map_record(payload, plan.mapping, provider_id=self.id), payload
         )
 
     async def _object_payload(
-        self, source: NetBoxObjectType, identifier: str, context: ProviderCallContext
+        self, plan: _FetchPlan, identifier: str, context: ProviderCallContext
     ) -> dict[str, Any]:
         """One object's raw payload, honouring the filter that scopes its family.
 
@@ -494,12 +538,12 @@ class NetBoxInventoryProvider(InventoryProvider):
         the scope indistinguishable from one that does not exist. Unscoped families keep
         the cheaper direct read.
         """
-        if not self._object_scope(source):
+        if not self._object_scope(plan):
             return await self._request_json(
-                f"{source.endpoint}{quote(identifier, safe='')}/", context
+                f"{plan.endpoint}{quote(identifier, safe='')}/", context
             )
         matches = await self._paginated(
-            self._object_path(source, _query_to_expr({"id": identifier})),
+            self._object_path(plan, _query_to_expr({"id": identifier})),
             context,
             page_limit=self._services.limits.max_provider_pages,
             # `id` is NetBox's primary key, so at most one row can match; asking for two
@@ -509,7 +553,7 @@ class NetBoxInventoryProvider(InventoryProvider):
         if not matches:
             raise self._error(
                 ProviderErrorCode.NOT_FOUND,
-                f"NetBox {source.display_name} {identifier} was not found within this "
+                f"NetBox {plan.object_type} {identifier} was not found within this "
                 "provider's configured object query",
                 context.operation,
             )

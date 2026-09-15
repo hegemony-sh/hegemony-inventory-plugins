@@ -13,10 +13,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from .enums import MaintenanceState, ResourceType
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle: mapping.py reads this module
+    from .mapping import ObjectFieldMapping
 
 AccessConfig = dict[str, Any]
 
@@ -37,6 +40,17 @@ class ProviderCallContext:
     query_hash: str | None = None
     config_version: int | None = None
     source_version: dict[str, Any] = field(default_factory=dict)
+    #: How to read the family being asked for, when the platform knows and the provider
+    #: might not.
+    #:
+    #: An object type a provider *discovered* is not in the catalogue it shipped -- that
+    #: is the whole point of discovering it -- so a later call cannot look up how to map
+    #: it. A provider is built fresh for every operation and cannot remember either. The
+    #: platform stored the mapping discovery returned, and hands it back here.
+    #:
+    #: ``None`` means the provider is on its own, which is the case for every family it
+    #: declared itself and for every provider that does not discover at all.
+    object_mapping: ObjectFieldMapping | None = None
 
 
 @dataclass(frozen=True, slots=True)

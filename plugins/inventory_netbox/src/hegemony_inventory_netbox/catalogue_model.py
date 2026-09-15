@@ -172,6 +172,10 @@ class NetBoxObjectType:
             display_name_field=self.display_name_field,
             field_map={name: attr.path for name, attr in self.attributes.items()},
             relationships=self.relationships,
+            # Where to fetch it. Opaque to the platform, which stores it with the rest of
+            # the mapping and hands it back when it asks for a family this provider
+            # discovered -- one that is, by definition, absent from the catalogue below.
+            source={"endpoint": self.endpoint, "base_query": self.base_query},
         )
 
     @property

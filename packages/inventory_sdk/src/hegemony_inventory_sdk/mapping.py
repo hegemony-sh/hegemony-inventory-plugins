@@ -46,6 +46,16 @@ class ObjectFieldMapping:
     field_map: Mapping[str, str] = field(default_factory=dict)
     display_name_field: str | None = None
     relationships: tuple[RelationshipMapping, ...] = ()
+    #: How the provider reaches this family, in whatever terms the provider uses.
+    #:
+    #: Opaque to the platform, which stores it and hands it straight back. A mapping
+    #: says how to read a record; it does not say where the records come from, and for a
+    #: family the provider *discovered* there is nowhere else for that to live -- the
+    #: family is absent from the catalogue the provider shipped, and the provider is
+    #: built fresh per operation and remembers nothing. So the provider writes down what
+    #: it will need (a REST path, a GraphQL type name) and reads it back on the next
+    #: call. Values are strings so the whole mapping round-trips through JSON unchanged.
+    source: Mapping[str, str] = field(default_factory=dict)
 
 
 def extract_path(record: Mapping[str, Any], path: str) -> Any:
