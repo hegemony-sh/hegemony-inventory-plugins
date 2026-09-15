@@ -55,14 +55,15 @@ from typing import Any
 
 from hegemony_inventory_sdk import RelationshipMapping
 
-from .object_types import (
-    OBJECT_TYPE_IDS_BY_QUALIFIED,
-    OBJECT_TYPES,
-    Attr,
-    NetBoxObjectType,
-    qualified_object_type_id,
+from .catalogue_model import Attr, NetBoxObjectType, qualified_object_type_id
+from .overlay import (
+    CORE_CONTRACT_IDS,
+    DEFAULT_EDGE_KEY,
+    DEFAULT_OVERLAY,
+    REGISTERED_IDS_BY_DERIVED,
+    Overlay,
+    ReplacedField,
 )
-from .overlay import DEFAULT_EDGE_KEY, DEFAULT_OVERLAY, Overlay, ReplacedField
 
 __all__ = [
     "DerivedCatalogue",
@@ -88,6 +89,11 @@ _COUNT_SUFFIX = "_count"
 _COUNT_PREFIX = "count_"
 
 _SCALAR_TYPES: frozenset[str] = frozenset({"string", "integer", "number", "boolean"})
+
+#: How NetBox names the two properties that encode a generic reference beside the
+#: rendered object itself: ``scope_type``/``scope_id``, ``parent_object_type``/
+#: ``parent_object_id``. Both spellings are in use, so both are recognised.
+_GENERIC_REF_SUFFIXES: tuple[str, ...] = ("_type", "_id", "_object_type", "_object_id")
 
 #: Suffixes NetBox appends to a serializer's name without changing the model it renders.
 #: ``/api/dcim/devices/`` returns ``DeviceWithConfigContext`` rows, while every reference
@@ -483,7 +489,11 @@ def _derive_family(
             relationships.append(edge)
 
     replaced = overlay.replaced_fields.get(family.endpoint, ())
-    legacy_names = {pair.legacy for pair in replaced}
+    generic_refs = {
+        name
+        for endpoint, name in (*overlay.untyped_paths, *overlay.untyped_objects)
+        if endpoint == family.endpoint
+    }
     for pair in replaced:
         if pair.legacy_path is None:
             if pair.legacy not in attributes:
@@ -533,7 +543,7 @@ def _derive_family(
         name_field=name_field,
         attributes=attributes,
         columns=(presentation.columns if presentation else ())
-        or _default_columns(attributes, natural, legacy_names),
+        or _default_columns(attributes, natural, replaced, generic_refs),
         search_fields=(presentation.search_fields if presentation else ())
         or _default_search_fields(attributes, natural, replaced),
         icon=presentation.icon if presentation else None,
@@ -623,8 +633,33 @@ def _describe(family: _Family) -> str:
     return f"NetBox {_titleize(family.segment).lower()}, as served by {family.endpoint}."
 
 
-#: Properties worth a column on nearly any family, in the order they read well.
-_PREFERRED_COLUMNS: tuple[str, ...] = ("name", "status", "role", "site", "tenant", "description")
+#: Columns worth leading with wherever a family has them. Everything after these comes
+#: from NetBox's own field order, so this list is short on purpose: it exists because
+#: lifecycle and role are what an operator scans a table for, and NetBox does not always
+#: declare them early.
+_LEADING_COLUMNS: tuple[str, ...] = ("status", "role")
+
+#: How many columns a derived browse table gets before ``description`` closes it. Six is
+#: what fits an inventory table without scrolling; past that a column is not read.
+_COLUMN_LIMIT = 6
+
+#: Properties that are never a column: NetBox's own bookkeeping, and the free-form blobs
+#: that have no useful cell rendering. Dropped by name rather than by type because
+#: ``created`` and ``last_updated`` are perfectly good strings and still not worth a
+#: column on every table in the product.
+_NEVER_COLUMNS: frozenset[str] = frozenset(
+    {
+        "comments",
+        "config_context",
+        "created",
+        "custom_field_data",
+        "custom_fields",
+        "last_updated",
+        "local_context_data",
+        "notes",
+        "tags",
+    }
+)
 #: Properties worth searching. Free text an operator would actually type.
 _PREFERRED_SEARCH: tuple[str, ...] = (
     "name",
@@ -637,22 +672,62 @@ _PREFERRED_SEARCH: tuple[str, ...] = (
 
 
 def _default_columns(
-    attributes: Mapping[str, Attr], natural: str, legacy: frozenset[str] | set[str]
+    attributes: Mapping[str, Attr],
+    natural: str,
+    replaced: Sequence[ReplacedField],
+    generic_refs: frozenset[str] | set[str] = frozenset(),
 ) -> tuple[str, ...]:
-    """Default browse columns.
+    """Default browse columns, taken from the order NetBox itself declares fields in.
 
-    Never a legacy spelling. A column costs screen space whether or not it holds
-    anything, so naming one a current NetBox has replaced leaves every operator a
-    permanently blank column -- the defect fixed for ``ip_prefix`` by hand, made
-    impossible here. Search fields are free of that cost and deliberately keep both
-    spellings; see the plugin README.
+    A serializer's field order is an editorial choice NetBox already made: the fields
+    that identify and distinguish an object come first, and the bookkeeping comes last.
+    Reading columns off that order recovers the great majority of what a person picking
+    columns by hand arrives at, and -- unlike a fixed list of favoured names -- it says
+    something useful about a family nobody wrote down in advance, which is the whole
+    point of deriving a catalogue at all.
+
+    Four corrections are applied to that order:
+
+    * the name field leads, then :data:`_LEADING_COLUMNS`, because lifecycle and role
+      are what an operator scans a table for and NetBox does not always declare them
+      early;
+    * a **legacy** spelling is never a column. A column costs screen space whether or
+      not it holds anything, so naming one a current NetBox has replaced leaves every
+      operator a permanently blank column -- the defect fixed for ``ip_prefix`` by hand,
+      made impossible here. Search fields are free of that cost and deliberately keep
+      both spellings; see the plugin README;
+    * where the replaced field *was* a column, its replacement takes the place.
+      Excluding one without promoting the other leaves the table showing neither, which
+      is the same blank column by another route. Which pairs those are is a judgement
+      the pair carries (:attr:`~.overlay.ReplacedField.column`), because an interface's
+      MAC is worth searching and not worth a column;
+    * the two properties that *encode* a generic reference -- ``scope_type`` and
+      ``scope_id`` beside ``scope``, ``parent_object_id`` beside ``parent`` -- are
+      dropped in favour of the reference itself. They are how the API transports the
+      relation, and a table of content-type numbers tells a reader nothing.
+
+    ``description`` closes the table when the family has one, whether or not the limit
+    was reached, because a row with no other distinguishing column still has that.
     """
-    chosen = [natural] if natural in attributes and natural not in legacy else []
+    legacy = {pair.legacy for pair in replaced}
+    encoded = {f"{ref}{suffix}" for ref in generic_refs for suffix in _GENERIC_REF_SUFFIXES}
+    skip = legacy | encoded | _NEVER_COLUMNS | {"description"}
+
+    chosen = [natural] if natural in attributes and natural not in skip else []
+    chosen += [name for name in _LEADING_COLUMNS if name in attributes and name not in skip]
+    for name, attr in attributes.items():
+        if len(chosen) >= _COLUMN_LIMIT:
+            break
+        if name in chosen or name in skip or attr.json_type in {"array", "object"}:
+            continue
+        chosen.append(name)
     chosen += [
-        name
-        for name in _PREFERRED_COLUMNS
-        if name in attributes and name != natural and name not in legacy
+        pair.generic
+        for pair in replaced
+        if pair.column and pair.generic in attributes and pair.generic not in chosen
     ]
+    if "description" in attributes and "description" not in chosen:
+        chosen.append("description")
     return tuple(chosen) or ("name",)
 
 
@@ -741,7 +816,14 @@ class DiscoveryReport:
 
 
 def compare_to_catalogue(derived: DerivedCatalogue, *, custom_fields: int = 0) -> DiscoveryReport:
-    """Measure a derived catalogue against the one this plugin ships."""
+    """Measure a derived catalogue against the one this plugin ships.
+
+    The shipped catalogue is imported here rather than at module scope on purpose: this
+    module *generates* that catalogue, and a module-level import would make the
+    generator depend on its own previous output.
+    """
+    from .object_types import OBJECT_TYPES
+
     served = {entry.endpoint for entry in derived.object_types}
     missing = tuple(entry.id for entry in OBJECT_TYPES if entry.endpoint not in served)
     offered = len(OBJECT_TYPES) - len(missing)
@@ -757,13 +839,6 @@ def compare_to_catalogue(derived: DerivedCatalogue, *, custom_fields: int = 0) -
     )
 
 
-#: Families the platform reads through its device and site contract rather than as
-#: generic objects. Discovery leaves them out -- offering them again would store every
-#: device twice -- but keeps them as relationship targets, which is how an interface
-#: still reaches its device.
-CORE_CONTRACT_IDS: Mapping[str, str] = {"dcim.devices": "device", "dcim.sites": "site"}
-
-
 def registered_catalogue(derived: DerivedCatalogue) -> tuple[NetBoxObjectType, ...]:
     """Re-key a derived catalogue onto the ids this plugin registers.
 
@@ -776,12 +851,13 @@ def registered_catalogue(derived: DerivedCatalogue) -> tuple[NetBoxObjectType, .
     So a family the catalogue already knows keeps its registered id, and only families it
     does not -- a later release's, a NetBox plugin's -- arrive under the derived one.
     Relationship targets are re-keyed the same way, or an edge would point at an id
-    nothing serves. :data:`~.object_types.LEGACY_OBJECT_TYPE_IDS` is the table both use.
+    nothing serves. :data:`~.overlay.REGISTERED_IDS` is the table both use.
     """
-    renamed = {**OBJECT_TYPE_IDS_BY_QUALIFIED, **CORE_CONTRACT_IDS}
+    renamed = REGISTERED_IDS_BY_DERIVED
+    contract = frozenset(CORE_CONTRACT_IDS)
     catalogue: list[NetBoxObjectType] = []
     for entry in derived.object_types:
-        if entry.id in CORE_CONTRACT_IDS:
+        if entry.endpoint in contract:
             continue
         relationships = tuple(
             RelationshipMapping(

@@ -16,6 +16,7 @@ import pytest
 
 from hegemony_inventory_netbox import object_types as catalogue, provider as netbox_provider_module
 from hegemony_inventory_netbox.config import NetBoxProviderConfig
+from hegemony_inventory_netbox.object_types import BY_ID
 from hegemony_inventory_netbox.provider import NetBoxInventoryProvider
 from hegemony_inventory_sdk import (
     Capability,
@@ -400,11 +401,14 @@ async def test_netbox_list_objects_maps_ip_prefixes(monkeypatch: pytest.MonkeyPa
     assert [o.object_type for o in objects] == ["ip_prefix", "ip_prefix"]
     assert [o.external_id for o in objects] == ["1", "2"]
     assert [o.name for o in objects] == ["10.0.0.0/24", "10.0.1.0/24"]
-    assert objects[0].attributes == {
+    assert set(objects[0].attributes) == set(BY_ID["ip_prefix"].attributes)
+    expected = {
         "prefix": "10.0.0.0/24",
         "status": "active",
         "vlan": 10,
         "role": "lan",
+        # NetBox 4.2 replaced Prefix.site with a generic scope. Both spellings are
+        # mapped, so a record from either release resolves and the other reads null.
         "site": "ams01",
         "scope": None,
         "scope_type": None,
@@ -413,6 +417,7 @@ async def test_netbox_list_objects_maps_ip_prefixes(monkeypatch: pytest.MonkeyPa
         "is_pool": False,
         "description": "core",
     }
+    assert {name: objects[0].attributes[name] for name in expected} == expected
     # Absent nested values map to None rather than raising or being stringified.
     assert objects[1].attributes["vlan"] is None
     assert objects[1].attributes["site"] is None
@@ -474,6 +479,21 @@ async def test_netbox_list_objects_maps_the_prefix_scope_on_netbox_4_2_and_later
     assert attributes["tenant"] == "meridian-internal"
 
 
+#: The dotted paths a VLAN record resolves through, and what they should yield. A
+#: rendered choice through ``status.value``, three references each read by a different
+#: natural key, and one reference the record does not carry at all.
+_EXPECTED_VLAN = {
+    "vid": 100,
+    "name": "prod-web",
+    "status": "active",
+    "site": "ams01",
+    "group": "campus",
+    "role": "server",
+    "tenant": None,
+    "description": "web tier",
+}
+
+
 @pytest.mark.asyncio
 async def test_netbox_list_objects_maps_vlans(monkeypatch: pytest.MonkeyPatch) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -513,16 +533,11 @@ async def test_netbox_list_objects_maps_vlans(monkeypatch: pytest.MonkeyPatch) -
     assert len(objects) == 1
     vlan = objects[0]
     assert (vlan.object_type, vlan.external_id, vlan.name) == ("vlan", "7", "prod-web")
-    assert vlan.attributes == {
-        "vid": 100,
-        "name": "prod-web",
-        "status": "active",
-        "site": "ams01",
-        "group": "campus",
-        "role": "server",
-        "tenant": None,
-        "description": "web tier",
-    }
+    # The mapper emits exactly the attributes the family declares -- no more, so a
+    # record cannot smuggle a field past the catalogue, and no fewer, so a path the
+    # record does not carry is stored as null rather than silently dropped.
+    assert set(vlan.attributes) == set(BY_ID["vlan"].attributes)
+    assert {name: vlan.attributes[name] for name in _EXPECTED_VLAN} == _EXPECTED_VLAN
 
 
 def test_netbox_merges_default_jump_host_onto_every_device() -> None:

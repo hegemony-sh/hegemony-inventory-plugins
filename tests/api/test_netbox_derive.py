@@ -17,6 +17,7 @@ or the catalogue having done so, and four such differences turned out to be the 
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import pathlib
 from typing import Any
@@ -31,7 +32,7 @@ from hegemony_inventory_netbox.derive import (
     read_status,
     registered_catalogue,
 )
-from hegemony_inventory_netbox.overlay import DEFAULT_OVERLAY, Overlay
+from hegemony_inventory_netbox.overlay import DEFAULT_OVERLAY, REGISTERED_IDS, Overlay
 from hegemony_inventory_sdk import DiscoveryResult, ObjectFieldMapping, ObjectTypeSpec
 
 _FIXTURE = pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "netbox-4.3-schema.json"
@@ -46,43 +47,65 @@ def test_the_fixture_is_a_real_netbox_release() -> None:
 
 
 # ── The conformance gate ──────────────────────────────────────────────────────
+#
+# The shipped catalogue is now the deriver's own output (``scripts/generate_catalogue``),
+# so the old gate -- "every hand-written family comes back from the schema" -- has
+# nothing left to compare and would pass whatever either side did. What is still worth
+# holding is the other direction: that the checked-in file is what the current deriver
+# and overlay produce, and that it never loses a family whose id is a persistence
+# contract.
 
 
-@pytest.mark.parametrize("entry", catalogue.OBJECT_TYPES, ids=lambda entry: entry.id)
-def test_the_deriver_reproduces_every_written_family(entry: catalogue.NetBoxObjectType) -> None:
-    """Each hand-written family is a collection endpoint the schema actually serves."""
-    assert entry.endpoint in _BY_ENDPOINT, f"{entry.id} names an endpoint NetBox 4.3 does not serve"
+def test_the_shipped_catalogue_is_what_the_deriver_produces() -> None:
+    """Regenerating changes nothing, or the checked-in catalogue is stale.
 
-
-@pytest.mark.parametrize("entry", catalogue.OBJECT_TYPES, ids=lambda entry: entry.id)
-def test_the_deriver_reproduces_every_written_attribute(
-    entry: catalogue.NetBoxObjectType,
-) -> None:
-    """Every written attribute comes back with the same path and type.
-
-    Where it does not, exactly one of the two is wrong about NetBox. Deciding which is
-    the work; this test is what makes the question come up at all.
+    A generated file that nobody regenerated is worse than a hand-written one: it reads
+    as the deriver's output while stating something the deriver no longer says. This is
+    the whole gate, and it fails on any change to the deriver, the overlay or the
+    recorded schema that was not regenerated -- the README's family table included.
     """
-    derived = _BY_ENDPOINT[entry.endpoint]
-    for name, attribute in entry.attributes.items():
-        found = derived.attributes.get(name)
-        assert found is not None, f"{entry.id}.{name} is not derivable from the schema"
-        assert (found.path, found.json_type) == (attribute.path, attribute.json_type), (
-            f"{entry.id}.{name}: the catalogue reads {attribute.path!r} as "
-            f"{attribute.json_type}, the schema says {found.path!r} as {found.json_type}"
-        )
+    spec = importlib.util.spec_from_file_location(
+        "_generate_catalogue",
+        pathlib.Path(__file__).resolve().parents[2] / "scripts" / "generate_catalogue.py",
+    )
+    assert spec and spec.loader
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+
+    assert generator.main(["--check"]) == 0, (
+        "the shipped catalogue is not what the deriver produces -- run "
+        "'uv run python scripts/generate_catalogue.py' and commit the result"
+    )
 
 
-def test_the_deriver_finds_more_than_the_written_catalogue_declares() -> None:
-    """The schema is a superset: the written catalogue is a selection from it.
+def test_the_shipped_catalogue_keeps_every_id_it_has_promised() -> None:
+    """No regeneration may drop a family whose id this plugin already registered.
 
-    This is the trade the deriver makes. It stores what NetBox serves rather than what
-    someone chose to keep, so a derived family carries more attributes than a written
-    one -- and never fewer, which is the previous test.
+    An object-type id is stored in ``inventory_provider_configs.object_types``, in the
+    ``object_type`` of every synced row, and inside user-authored flow definitions.
+    Losing one does not remove a feature, it orphans data -- so the fifty ids frozen in
+    :data:`~hegemony_inventory_netbox.overlay.REGISTERED_IDS` are a floor the generated
+    catalogue may rise above and never fall below.
     """
-    written = sum(len(entry.attributes) for entry in catalogue.OBJECT_TYPES)
-    derived = sum(len(_BY_ENDPOINT[entry.endpoint].attributes) for entry in catalogue.OBJECT_TYPES)
-    assert derived > written
+    shipped = {entry.id for entry in catalogue.OBJECT_TYPES}
+    promised = set(REGISTERED_IDS.values())
+    assert promised <= shipped, f"the catalogue no longer offers: {sorted(promised - shipped)}"
+
+
+def test_the_shipped_catalogue_stores_what_netbox_serves() -> None:
+    """Every shipped family carries every attribute the schema declares for it.
+
+    This is the trade the deriver makes and the reason the catalogue is generated at
+    all: it stores what NetBox serves rather than what someone selected, so a family is
+    only ever narrower than the schema where the overlay says so on purpose.
+    """
+    thin = [
+        entry.id
+        for entry in catalogue.OBJECT_TYPES
+        if entry.endpoint in _BY_ENDPOINT
+        and len(entry.attributes) < len(_BY_ENDPOINT[entry.endpoint].attributes)
+    ]
+    assert not thin, f"shipped families carry fewer attributes than the schema: {thin}"
 
 
 # ── App-qualified ids ─────────────────────────────────────────────────────────
@@ -213,11 +236,18 @@ def test_a_choice_field_carries_its_choices_into_the_field_schema() -> None:
     status = {entry.id: entry for entry in _DERIVED.object_types}["dcim.sites"].attributes["status"]
     assert status.enum == ("planned", "staging", "active", "decommissioning", "retired")
     assert status.schema["enum"] == list(status.enum)
-    assert not any(
-        attribute.enum
+    # And the shipped catalogue carries them, which a hand-written one never did:
+    # keeping thirty choice lists correct by hand is not work anyone would choose.
+    with_choices = [
+        f"{entry.id}.{name}"
         for entry in catalogue.OBJECT_TYPES
-        for attribute in entry.attributes.values()
-    ), "the written catalogue declares no choice sets, which is the point being made"
+        for name, attribute in entry.attributes.items()
+        if attribute.enum
+    ]
+    assert len(with_choices) > 100, (
+        f"the shipped catalogue declares only {len(with_choices)} choice sets; "
+        "deriving them is the difference between a filter and a text box"
+    )
 
 
 def test_a_nullable_choice_still_admits_null() -> None:
@@ -262,30 +292,26 @@ def test_a_serializer_variant_still_resolves_to_the_family_it_renders() -> None:
     assert vm_edges["virtual_machine"] == "virtualization.virtual_machines"
 
 
-_CORE_CONTRACT_IDS = {"device": "dcim.devices", "site": "dcim.sites"}
+_CORE_CONTRACT_IDS = frozenset({"device", "site"})
 
 
 @pytest.mark.parametrize("entry", catalogue.OBJECT_TYPES, ids=lambda entry: entry.id)
-def test_the_deriver_reproduces_every_written_edge(entry: catalogue.NetBoxObjectType) -> None:
-    """Every written relationship comes back pointing at the same family by the same key.
+def test_every_shipped_edge_points_at_a_family_something_serves(
+    entry: catalogue.NetBoxObjectType,
+) -> None:
+    """An edge names a target the platform can actually reach.
 
-    Matched on target and source rather than on the edge's label: the written catalogue
-    names some edges after the type they reach (``tenant_group`` for the ``group``
-    property) while the deriver names them after the property, which is derivable and
-    disambiguated by the target. What has to agree is where the edge goes and what it
-    cites to get there.
+    The deriver names families after their endpoints and the catalogue re-keys the fifty
+    it has promised onto the ids it registers. Re-key an entry and forget its edges and
+    every edge into that family points at an id nothing serves -- a graph that looks
+    whole and resolves nowhere. Devices and sites are the deliberate exception: they are
+    reached through the platform's own contract rather than as generic objects.
     """
-    derived = {
-        (edge.target_object_type, edge.source)
-        for edge in _BY_ENDPOINT[entry.endpoint].relationships
-    }
+    shipped = {other.id for other in catalogue.OBJECT_TYPES} | set(_CORE_CONTRACT_IDS)
     for relationship in entry.relationships:
-        target = catalogue.LEGACY_OBJECT_TYPE_IDS.get(
-            relationship.target_object_type
-        ) or _CORE_CONTRACT_IDS.get(relationship.target_object_type)
-        assert (target, relationship.source) in derived, (
-            f"{entry.id}.{relationship.rel} points at {target} via "
-            f"{relationship.source!r}; the deriver produced {sorted(derived)}"
+        assert relationship.target_object_type in shipped, (
+            f"{entry.id}.{relationship.rel} points at "
+            f"{relationship.target_object_type!r}, which no family serves"
         )
 
 

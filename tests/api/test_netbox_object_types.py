@@ -40,7 +40,10 @@ from tests.inventory_fakes import FakePlatformServices
 
 _CORE_RESOURCES = {ResourceType.DEVICE.value, ResourceType.SITE.value}
 _ENDPOINT = re.compile(r"^/api/[a-z][a-z0-9-]*/[a-z][a-z0-9-]*/$")
-_OBJECT_TYPE_ID = re.compile(r"^[a-z][a-z0-9_]*$")
+#: An object-type id is either a bare singular -- the fifty this plugin promised before
+#: the deriver existed and must keep offering -- or ``app.family``, which the deriver
+#: reads straight off the endpoint and so can produce for a family nobody wrote down.
+_OBJECT_TYPE_ID = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)?$")
 
 
 def _provider(config: dict[str, Any] | None = None) -> NetBoxInventoryProvider:
@@ -276,7 +279,11 @@ async def test_list_objects_maps_a_catalogue_family_with_its_edges(
     assert interface.object_type == "interface"
     assert interface.external_id == "41"
     assert interface.name == "ge-0/0/1"
-    assert interface.attributes == {
+    # The mapper emits exactly what the family declares -- no more, so a record cannot
+    # smuggle a field past the catalogue, and no fewer, so a path this record does not
+    # carry is stored as null rather than quietly missing.
+    assert set(interface.attributes) == set(catalogue.BY_ID["interface"].attributes)
+    expected = {
         "name": "ge-0/0/1",
         "device": "ams01-core-01",
         "type": "1000base-t",
@@ -287,9 +294,8 @@ async def test_list_objects_maps_a_catalogue_family_with_its_edges(
         "mode": "tagged",
         "lag": "ae0",
         "untagged_vlan": 100,
-        "mark_connected": False,
-        "description": "uplink",
     }
+    assert {name: interface.attributes[name] for name in expected} == expected
     # Edges cite the same external ids the related rows are keyed on, so an interface
     # points at the device row a device sync created.
     assert {

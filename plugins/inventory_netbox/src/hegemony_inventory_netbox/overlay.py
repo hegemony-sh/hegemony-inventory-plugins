@@ -47,6 +47,10 @@ Five kinds of correction live here, and nothing else belongs:
 
 ``SKIP_ENDPOINTS``
     NetBox's own plumbing, which is not inventory.
+
+``REGISTERED_IDS``
+    The id this plugin registers for a family, where it differs from the derived one.
+    A persistence contract rather than a preference -- see the table's own note.
 """
 
 from __future__ import annotations
@@ -54,6 +58,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
+
+from .catalogue_model import qualified_object_type_id
 
 #: Referenced-object property to read, by the schema component naming that object.
 #:
@@ -149,6 +155,14 @@ class ReplacedField:
     #: Endpoint of the family the legacy spelling points at, when it is a reference.
     #: Without it a release serving the legacy field loses the edge as well as the name.
     legacy_target: str | None = None
+    #: Whether the *generic* spelling belongs in the browse table.
+    #:
+    #: Excluding the legacy spelling from the columns is not enough on its own: where
+    #: the replaced field was a column, dropping it and not promoting its replacement
+    #: leaves the table showing neither. It is a per-pair judgement rather than a rule,
+    #: because some replacements are not column material -- an interface's MAC and a
+    #: contact's groups are worth searching and not worth the screen space.
+    column: bool = False
 
 
 #: Every field NetBox replaced, by endpoint.
@@ -161,14 +175,22 @@ class ReplacedField:
 #: * no browse column ever names it, because a column costs screen space whether or not
 #:   anything lands in it;
 #: * both spellings stay searchable, because a search field costs nothing and an absent
-#:   attribute simply never matches.
+#:   attribute simply never matches;
+#: * the generic spelling takes the column the legacy one used to hold, where the pair
+#:   says so -- see :attr:`ReplacedField.column`.
 #:
-#: The last two are the asymmetry the plugin README sets out. Declaring the pairs once
-#: is what stops the three rules from drifting apart.
+#: The middle two are the asymmetry the plugin README sets out. Declaring the pairs once
+#: is what stops the four rules from drifting apart.
 REPLACED_FIELDS: Mapping[str, tuple[ReplacedField, ...]] = MappingProxyType(
     {
         "/api/circuits/circuit-terminations/": (
-            ReplacedField("site", "termination", "site.slug", legacy_target="/api/dcim/sites/"),
+            ReplacedField(
+                "site",
+                "termination",
+                "site.slug",
+                legacy_target="/api/dcim/sites/",
+                column=True,
+            ),
             ReplacedField(
                 "provider_network",
                 "termination",
@@ -178,10 +200,22 @@ REPLACED_FIELDS: Mapping[str, tuple[ReplacedField, ...]] = MappingProxyType(
         ),
         "/api/dcim/interfaces/": (ReplacedField("mac_address", "primary_mac_address"),),
         "/api/ipam/prefixes/": (
-            ReplacedField("site", "scope", "site.slug", legacy_target="/api/dcim/sites/"),
+            ReplacedField(
+                "site",
+                "scope",
+                "site.slug",
+                legacy_target="/api/dcim/sites/",
+                column=True,
+            ),
         ),
         "/api/ipam/services/": (
-            ReplacedField("device", "parent", "device.name", legacy_target="/api/dcim/devices/"),
+            ReplacedField(
+                "device",
+                "parent",
+                "device.name",
+                legacy_target="/api/dcim/devices/",
+                column=True,
+            ),
             ReplacedField(
                 "virtual_machine",
                 "parent",
@@ -191,7 +225,13 @@ REPLACED_FIELDS: Mapping[str, tuple[ReplacedField, ...]] = MappingProxyType(
         ),
         "/api/tenancy/contacts/": (ReplacedField("group", "groups", "group.name"),),
         "/api/virtualization/clusters/": (
-            ReplacedField("site", "scope", "site.slug", legacy_target="/api/dcim/sites/"),
+            ReplacedField(
+                "site",
+                "scope",
+                "site.slug",
+                legacy_target="/api/dcim/sites/",
+                column=True,
+            ),
         ),
         "/api/virtualization/interfaces/": (ReplacedField("mac_address", "primary_mac_address"),),
     }
@@ -219,6 +259,96 @@ class Presentation:
 #: that is the numeric ``id``, which is why this table has one entry: the platform
 #: materialises sites through the site contract, which keys them on their slug.
 EDGE_KEYS: Mapping[str, str] = MappingProxyType({"/api/dcim/sites/": "slug"})
+
+#: The object-type id this plugin registers for a NetBox endpoint.
+#:
+#: The deriver names a family after its endpoint -- ``dcim.interfaces`` -- because that
+#: needs no choosing and cannot collide. The ids below were chosen by hand before it
+#: existed, and they are a **persistence contract**: an object-type id is stored in
+#: ``inventory_provider_configs.object_types``, in the ``object_type`` of every synced
+#: row, and inside the option sources of user-authored flow definitions. Renaming one
+#: strands all three.
+#:
+#: So discovery *extends* what a provider offers rather than shadowing it: a family
+#: named here keeps its id, and only a family absent from this table -- a later
+#: release's, a NetBox plugin's -- arrives under the derived spelling. Freezing the
+#: table here rather than reading it back off the generated catalogue is what makes
+#: generation reproducible from a schema and this module alone.
+REGISTERED_IDS: Mapping[str, str] = MappingProxyType(
+    {
+        "/api/circuits/circuit-terminations/": "circuit_termination",
+        "/api/circuits/circuit-types/": "circuit_type",
+        "/api/circuits/circuits/": "circuit",
+        "/api/circuits/provider-networks/": "provider_network",
+        "/api/circuits/providers/": "circuit_provider",
+        "/api/dcim/cables/": "cable",
+        "/api/dcim/console-ports/": "console_port",
+        "/api/dcim/device-roles/": "device_role",
+        "/api/dcim/device-types/": "device_type",
+        "/api/dcim/front-ports/": "front_port",
+        "/api/dcim/interfaces/": "interface",
+        "/api/dcim/inventory-items/": "inventory_item",
+        "/api/dcim/locations/": "location",
+        "/api/dcim/manufacturers/": "manufacturer",
+        "/api/dcim/module-types/": "module_type",
+        "/api/dcim/modules/": "module",
+        "/api/dcim/platforms/": "platform",
+        "/api/dcim/power-feeds/": "power_feed",
+        "/api/dcim/power-outlets/": "power_outlet",
+        "/api/dcim/power-panels/": "power_panel",
+        "/api/dcim/power-ports/": "power_port",
+        "/api/dcim/racks/": "rack",
+        "/api/dcim/rear-ports/": "rear_port",
+        "/api/dcim/virtual-chassis/": "virtual_chassis",
+        "/api/dcim/virtual-device-contexts/": "virtual_device_context",
+        "/api/extras/config-contexts/": "config_context",
+        "/api/extras/journal-entries/": "journal_entry",
+        "/api/ipam/aggregates/": "aggregate",
+        "/api/ipam/asns/": "asn",
+        "/api/ipam/fhrp-groups/": "fhrp_group",
+        "/api/ipam/ip-addresses/": "ip_address",
+        "/api/ipam/ip-ranges/": "ip_range",
+        "/api/ipam/prefixes/": "ip_prefix",
+        "/api/ipam/rirs/": "rir",
+        "/api/ipam/roles/": "ipam_role",
+        "/api/ipam/route-targets/": "route_target",
+        "/api/ipam/services/": "service",
+        "/api/ipam/vlan-groups/": "vlan_group",
+        "/api/ipam/vlans/": "vlan",
+        "/api/ipam/vrfs/": "vrf",
+        "/api/tenancy/contacts/": "contact",
+        "/api/tenancy/tenant-groups/": "tenant_group",
+        "/api/tenancy/tenants/": "tenant",
+        "/api/virtualization/clusters/": "cluster",
+        "/api/virtualization/interfaces/": "vm_interface",
+        "/api/virtualization/virtual-machines/": "virtual_machine",
+        "/api/vpn/l2vpns/": "l2vpn",
+        "/api/vpn/tunnels/": "vpn_tunnel",
+        "/api/wireless/wireless-lans/": "wireless_lan",
+        "/api/wireless/wireless-links/": "wireless_link",
+    }
+)
+
+#: Families the platform reads through its own device and site contract rather than as
+#: generic objects. A generated catalogue leaves them out -- offering them again would
+#: store every device twice -- but they stay relationship targets, which is how an
+#: interface still reaches its device.
+CORE_CONTRACT_IDS: Mapping[str, str] = MappingProxyType(
+    {
+        "/api/dcim/devices/": "device",
+        "/api/dcim/sites/": "site",
+    }
+)
+
+#: Derived id -> registered id, for both tables above. Relationship edges cite object
+#: type ids rather than endpoints, so re-keying them needs this spelling.
+REGISTERED_IDS_BY_DERIVED: Mapping[str, str] = MappingProxyType(
+    {
+        qualified_object_type_id(endpoint): object_type
+        for endpoint, object_type in {**REGISTERED_IDS, **CORE_CONTRACT_IDS}.items()
+    }
+)
+
 
 #: The property every other family is cited by.
 DEFAULT_EDGE_KEY = "id"
