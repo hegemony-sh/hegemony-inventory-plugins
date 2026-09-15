@@ -1226,12 +1226,15 @@ async def test_query_devices_and_list_sites_refuse_the_same_way() -> None:
     provider = _provider(token="netbox-token")
     context = ProviderCallContext(provider_id="netbox:primary", operation="auto_sync")
 
+    # Built when called, not when the tuple is: a tuple of coroutines would leave the
+    # second one un-awaited if the first assertion failed, and the resulting warning
+    # buries the failure that actually matters.
     for call in (
-        provider.query_devices("", context=context),
-        provider.list_sites(context=context),
+        lambda: provider.query_devices("", context=context),
+        lambda: provider.list_sites(context=context),
     ):
         with pytest.raises(InventoryProviderError) as raised:
-            await call
+            await call()
         assert "Discover" in raised.value.envelope.message
 
 
