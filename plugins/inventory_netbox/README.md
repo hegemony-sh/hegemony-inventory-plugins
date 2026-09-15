@@ -353,3 +353,112 @@ than an error, which is how one catalogue serves several NetBox releases.
 After installing the new wheel version and restarting, the family appears in the
 Objects page's type picker and in the provider form's type selection — no core change
 and no database migration. It is read by any provider whose selection includes it.
+
+## Deriving the catalogue from a NetBox schema
+
+Every NetBox serves `/api/schema/`: a complete OpenAPI description of the API it is
+actually running, generated from its own models. Almost everything the catalogue above
+states by hand is already in there — which families exist, which app each belongs to,
+what properties they carry, their types, their nullability, their choice sets — and it
+is right about the release in front of it rather than the release someone had in mind.
+
+`src/hegemony_inventory_netbox/derive.py` reads that document and produces the same
+`NetBoxObjectType` entries the catalogue declares, so the two can be compared directly.
+
+### What the comparison proves
+
+`tests/api/test_netbox_derive.py` derives from a recorded NetBox 4.3 schema and checks
+every hand-written attribute against it. All 50 families and all 328 attributes come
+back with the same dotted path and the same type.
+
+Getting there found four defects in the written catalogue, all silent:
+
+| Family | Field | Was | Is |
+|---|---|---|---|
+| `cable` | `type` | `type.value` | `type` |
+| `fhrp_group` | `protocol` | `protocol.value` | `protocol` |
+| `fhrp_group` | `auth_type` | `auth_type.value` | `auth_type` |
+| `journal_entry` | `created_by` | declared a string | declared an integer |
+
+The first three are one mistake made three times. NetBox renders most choice fields as
+a `{value, label}` object, so `status.value` is right — but it renders *some* flat, as a
+bare string, and reading `.value` from one of those yields `None` on every record
+forever. Nothing in NetBox's API reference distinguishes the two shapes; the schema
+does. `cable.type` and `fhrp_group.protocol` were browse columns, so the symptom was a
+permanently blank column — the same symptom as the `ip_prefix` fix above.
+
+The fourth is smaller: NetBox serves a journal entry's author as a numeric user id, and
+the catalogue declared it a string.
+
+The deriver also finds **776 attributes across those same 50 families** where the
+catalogue declares 328, and gives 68 of them an exact choice set that no hand-written
+entry carries. That is the trade: it stores what NetBox serves rather than what someone
+selected, so a derived family is larger, and never narrower.
+
+It offers 104 families in total, against the 50 the catalogue lists — every collection
+endpoint a stock 4.3 serves, minus NetBox's own plumbing.
+
+### Object-type ids are app-qualified
+
+Derived ids are `dcim.interfaces`, not `interface`. The endpoint already is unique, so
+qualifying by app needs no table of exceptions and no invented names — which is what
+lets the deriver name families nobody wrote down in advance, a NetBox plugin's models
+included. A bare singular cannot: NetBox serves interfaces under both `dcim` and
+`virtualization`, and roles under both `dcim` and `ipam`.
+
+The plugin still **registers** the hand-chosen ids. `LEGACY_OBJECT_TYPE_IDS` in
+`object_types.py` publishes the mapping between the two, derived from the catalogue so
+it cannot go stale. Adopting the derived spelling is not a rename of a constant: an
+object-type id is stored in `inventory_provider_configs.object_types`, in the
+`object_type` of every synced row, and inside the option sources of user-authored flow
+definitions, so it means migrating that data and accepting both spellings while it
+happens. The table is what makes that mechanical when it is worth doing.
+
+### What stays hand-written
+
+`overlay.py`, and only that. Every entry is a claim the schema does not make:
+
+| Table | Size | Why the schema cannot say |
+|---|---|---|
+| `NATURAL_KEYS` | 7 | Which property of a referenced object to store. NetBox marks none of them. |
+| `UNTYPED_PATHS` | 17 | Generic references carry no type at all — `Prefix.scope` is `{"nullable": true, "readOnly": true}` and nothing more. |
+| `UNTYPED_OBJECTS` | 8 | Free-form JSON has the same untyped shape as a generic reference. |
+| `LEGACY_ATTRIBUTES` | 7 | A schema describes one release; the shipped catalogue serves a range. |
+| `KEEP_PROPERTIES` | 1 | A virtual chassis's member count is the fact, not a counter about other objects. |
+| `CONTENT_TYPES` | 0 | Reserved: a NetBox plugin may name endpoints the singularisation rule cannot reach. |
+| `SKIP_ENDPOINTS` | 24 | NetBox's own plumbing is not inventory. |
+
+Everything else is derived, including the rules the written catalogue had to be
+corrected into following: a derived browse column never names a legacy spelling, and a
+derived name field is the property someone *sets* rather than one NetBox computes, so a
+prefix is named by `prefix` and not by how many child prefixes it has.
+
+On a stock NetBox 4.3 the deriver emits **no warnings at all**, which is what makes a
+warning worth reading: it means that instance serves a shape the overlay has not seen —
+a later release, or a plugin's own model.
+
+### Custom fields
+
+`custom_field_attributes` turns an `/api/extras/custom-fields/` listing into stored
+attributes under `custom_fields.<name>`. This is the part no shipped catalogue can ever
+cover: every NetBox has custom fields, no two have the same ones, and the written
+catalogue maps not one of them.
+
+### Regenerating the fixture
+
+`tests/fixtures/netbox-4.3-schema.json` is a real document, reduced to what the deriver
+reads. Nothing in it was written to make the tests pass, which is the only reason the
+conformance test means anything.
+
+```console
+curl -H 'Accept: application/json' https://netbox.example/api/schema/ > schema.json
+python scripts/trim_netbox_schema.py schema.json tests/fixtures/netbox-4.3-schema.json
+```
+
+### What this does not do yet
+
+The deriver does not run at sync time. The shipped catalogue is still the hand-written
+one, and the derived catalogue exists to check it. Running discovery against a live
+instance — so that a provider offers the families *its* NetBox has, plugin models and
+custom fields included — needs a per-provider object-type registry in the platform and
+is not a plugin-only change.

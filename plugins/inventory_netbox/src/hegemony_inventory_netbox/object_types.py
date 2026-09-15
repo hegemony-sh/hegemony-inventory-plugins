@@ -48,13 +48,25 @@ class Attr:
     path: str
     json_type: str = "string"
     nullable: bool = True
+    #: The values this attribute may take, when the source constrains them. A NetBox
+    #: schema states the choice set for every status, type and role field; a
+    #: hand-written entry almost never does, because keeping thirty such lists correct
+    #: by hand is not work anyone would choose. :mod:`.derive` fills this in, so a
+    #: derived catalogue can offer an exact filter where a written one can only offer a
+    #: text box.
+    enum: tuple[str | int, ...] = ()
 
     @property
     def schema(self) -> dict[str, Any]:
         """This attribute as a JSON Schema property."""
-        if self.nullable:
-            return {"type": [self.json_type, "null"]}
-        return {"type": self.json_type}
+        schema: dict[str, Any] = {
+            "type": [self.json_type, "null"] if self.nullable else self.json_type
+        }
+        if self.enum:
+            # A nullable enum has to admit null explicitly: JSON Schema intersects
+            # `type` and `enum`, so omitting it would exclude the null the type allows.
+            schema["enum"] = [*self.enum, None] if self.nullable else list(self.enum)
+        return schema
 
 
 def _text(path: str, *, nullable: bool = True) -> Attr:
@@ -83,6 +95,27 @@ def _json(path: str) -> Attr:
 
 def _rel(rel: str, target: str, source: str) -> RelationshipMapping:
     return RelationshipMapping(rel=rel, target_object_type=target, source=source)
+
+
+def qualified_object_type_id(endpoint: str) -> str:
+    """The app-qualified id for a NetBox list endpoint, e.g. ``dcim.ip_addresses``.
+
+    An object-type id has to be unique across everything a provider registers, and the
+    endpoint already is: NetBox serves both ``/api/dcim/interfaces/`` and
+    ``/api/virtualization/interfaces/``, so a bare singular has to invent a name for one
+    of them and keep a table of the inventions. Qualifying by app needs no table and no
+    invention, which is what lets :mod:`.derive` produce ids for families -- plugin
+    models included -- that nobody wrote down in advance.
+
+    Plugin endpoints live under ``/api/plugins/<app>/<family>/`` and qualify by their
+    own app, so two NetBox plugins cannot collide either.
+    """
+    segments = endpoint.strip("/").split("/")
+    if segments[:2] == ["api", "plugins"]:
+        app, family = segments[2], segments[3]
+    else:
+        app, family = segments[1], segments[2]
+    return f"{app.replace('-', '_')}.{family.replace('-', '_')}"
 
 
 #: NetBox app label -> the name an operator sees it under. NetBox's own apps are the
@@ -129,6 +162,11 @@ class NetBoxObjectType:
     relationships: tuple[RelationshipMapping, ...] = ()
     #: Extra NetBox filter always applied to this family, on top of any configured one.
     base_query: str = ""
+
+    @property
+    def qualified_id(self) -> str:
+        """This family's app-qualified id; see :func:`qualified_object_type_id`."""
+        return qualified_object_type_id(self.endpoint)
 
     @property
     def mapping(self) -> ObjectFieldMapping:
@@ -597,7 +635,10 @@ _DCIM: tuple[NetBoxObjectType, ...] = (
         search_fields=("label", "description"),
         attributes={
             "label": _text("label"),
-            "type": _text("type.value"),
+            # NetBox renders a cable's type as a bare string enum rather than the
+            # {value, label} object most choice fields use, so there is no `.value`
+            # here to read -- see the module docstring of `derive`.
+            "type": _text("type"),
             "status": _text("status.value"),
             "a_terminations": _list("a_terminations"),
             "b_terminations": _list("b_terminations"),
@@ -996,9 +1037,10 @@ _IPAM: tuple[NetBoxObjectType, ...] = (
         columns=("name", "protocol", "group_id", "description"),
         search_fields=("name", "description"),
         attributes={
-            "protocol": _text("protocol.value"),
+            # Bare string enums too, as for `cable.type`.
+            "protocol": _text("protocol"),
             "group_id": _int("group_id"),
-            "auth_type": _text("auth_type.value"),
+            "auth_type": _text("auth_type"),
             "description": _text("description"),
         },
     ),
@@ -1363,7 +1405,8 @@ _EXTRAS: tuple[NetBoxObjectType, ...] = (
             "assigned_object_type": _text("assigned_object_type"),
             "assigned_object_id": _int("assigned_object_id"),
             "created": _text("created"),
-            "created_by": _text("created_by"),
+            # NetBox serves the author's numeric user id here, not a name.
+            "created_by": _int("created_by"),
             "kind": _text("kind.value"),
             "comments": _text("comments"),
         },
@@ -1386,6 +1429,26 @@ BY_ID: Mapping[str, NetBoxObjectType] = {entry.id: entry for entry in OBJECT_TYP
 
 #: Every catalogue id, sorted, for error messages and documentation.
 ALL_OBJECT_TYPE_IDS: tuple[str, ...] = tuple(sorted(BY_ID))
+
+#: Registered id -> app-qualified id, for every family in the catalogue.
+#:
+#: The ids this plugin registers are bare singulars chosen by hand (``interface``,
+#: ``vm_interface``, ``circuit_provider``). :mod:`.derive` produces app-qualified ones
+#: instead, because those need no choosing: see :func:`qualified_object_type_id`.
+#:
+#: This table is the whole distance between the two, and it exists to be *used* rather
+#: than admired. An object-type id is not an internal detail -- it is stored in
+#: ``inventory_provider_configs.object_types``, in the ``object_type`` of every synced
+#: row, and inside the option sources of user-authored flow definitions -- so adopting
+#: the derived ids means migrating that data and accepting both spellings while it
+#: happens. Publishing the mapping here is what makes that migration mechanical, and
+#: keeping it derived from the catalogue is what stops it going stale.
+LEGACY_OBJECT_TYPE_IDS: Mapping[str, str] = {entry.id: entry.qualified_id for entry in OBJECT_TYPES}
+
+#: The reverse: app-qualified id -> the id this plugin registers today.
+OBJECT_TYPE_IDS_BY_QUALIFIED: Mapping[str, str] = {
+    qualified: legacy for legacy, qualified in LEGACY_OBJECT_TYPE_IDS.items()
+}
 
 
 def object_type_specs() -> tuple[ObjectTypeSpec, ...]:
