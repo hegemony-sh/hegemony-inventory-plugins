@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from .mapping import ObjectFieldMapping
 from .objecttype import ObjectTypeSpec
@@ -62,7 +62,7 @@ class ProjectionBinding:
     """
 
     #: ``"device"`` or ``"site"``: the platform table these objects become.
-    target: str
+    target: Literal["device", "site"]
     #: The stored object family to read.
     object_type: str
     #: Attribute path for the row's name. Defaults to the object's own name.
