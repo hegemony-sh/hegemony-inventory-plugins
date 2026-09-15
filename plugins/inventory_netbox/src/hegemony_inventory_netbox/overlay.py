@@ -505,3 +505,43 @@ class Overlay:
 
 
 DEFAULT_OVERLAY = Overlay()
+
+
+#: The site tree each ``site_tree_source`` choice produces.
+#:
+#: NetBox keeps two independent hierarchies above a site -- Region (geography) and Site
+#: Group (function) -- and a platform site has one parent, so one has to be chosen. Both
+#: are real families with real edges now, so the choice is which edge a site's parent
+#: comes from and which second family is bound beside it, rather than which set of nodes
+#: to invent. ``none`` binds sites alone and they arrive flat.
+#:
+#: Kept out of :data:`BINDINGS` deliberately: that is the default set the shipped
+#: catalogue carries, and a catalogue offering both trees at once would describe a site
+#: as having two parents.
+SITE_TREE_BINDINGS: Mapping[str, tuple[str, str, ProjectionBinding]] = MappingProxyType(
+    {
+        # site_tree_source -> (the site's parent edge, the endpoint bound beside it, how)
+        "region": (
+            "region",
+            "/api/dcim/regions/",
+            ProjectionBinding(
+                target="site",
+                object_type="region",
+                name="name",
+                parent_edge="parent",
+                external_id_prefix="region:",
+            ),
+        ),
+        "site_group": (
+            "group",
+            "/api/dcim/site-groups/",
+            ProjectionBinding(
+                target="site",
+                object_type="site_group",
+                name="name",
+                parent_edge="parent",
+                external_id_prefix="site-group:",
+            ),
+        ),
+    }
+)

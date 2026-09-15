@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from .mapping import ObjectFieldMapping
 from .objecttype import ObjectTypeSpec
@@ -80,8 +81,32 @@ class ProjectionBinding:
     maintenance_state_map: Mapping[str, str] = field(default_factory=dict)
     #: Attribute paths for access-config secret references, by dotted config key.
     secret_refs: Mapping[str, str] = field(default_factory=dict)
+    #: Access config every projected device starts from, before :attr:`secret_refs`.
+    #:
+    #: Literal values rather than paths: a transport port or a username the whole estate
+    #: shares is a property of the provider, not of any one record, and there is nothing
+    #: in the source to read it from. What a record does carry wins over it.
+    default_access_config: Mapping[str, Any] = field(default_factory=dict)
     #: Attribute paths copied into the row's tags, by tag key.
     tags: Mapping[str, str] = field(default_factory=dict)
+    #: Attribute path to a *list* whose entries each become a tag key set to ``"true"``.
+    #:
+    #: A source's own tags are usually a flat list of labels, while the platform filters
+    #: devices on a ``key=value`` map -- ``tags[role]=core`` in device search, ``tag.*``
+    #: in a run form. One path and one key cannot express that: the list has no fixed
+    #: length and its entries *are* the keys. So this names the list, and
+    #: :attr:`tag_prefix` namespaces what comes out of it.
+    #:
+    #: Entries may be plain strings or objects; an object contributes its ``slug``, or
+    #: its ``name`` where it has no slug, because that is how every source that models a
+    #: tag as a record spells the stable half of it.
+    tag_list: str | None = None
+    #: Prefix for the keys :attr:`tag_list` produces.
+    #:
+    #: Source tags and mapped fields share one namespace on the row, so a source tag
+    #: named ``role`` would otherwise overwrite the mapped role. An empty prefix is
+    #: allowed and means the operator has accepted that.
+    tag_prefix: str = ""
 
     def __post_init__(self) -> None:
         if self.target not in ("device", "site"):
@@ -92,6 +117,10 @@ class ProjectionBinding:
             raise ValueError("ProjectionBinding: a site has no hostname and no site edge")
         if self.target == "device" and self.parent_edge:
             raise ValueError("ProjectionBinding: a device has no parent edge; use site_edge")
+        if self.tag_prefix and not self.tag_list:
+            # A prefix with nothing to prefix is a mapping that does not do what its
+            # author thinks it does, which is worth failing rather than ignoring.
+            raise ValueError("ProjectionBinding: tag_prefix is set but tag_list is not")
 
 
 @dataclass(frozen=True, slots=True)

@@ -108,8 +108,8 @@ locally-set state is not overwritten by a sync. Override the table per provider 
 
 ### Scoping which devices sync
 
-Auto-sync calls `query_devices` with an empty expression, so by default a provider
-imports the **entire** NetBox device table. `device_query` sets a baseline filter applied
+Devices are an object family, and without a filter a provider imports the **entire**
+NetBox device table. `device_query` sets a baseline filter applied
 to every device read:
 
 ```json
@@ -169,23 +169,25 @@ exist in neither system.
 | `site_group` | The same, using site groups |
 | `none` | No tree. Sites arrive flat, and the hierarchy endpoint is never fetched |
 
-**The axis that loses is not lost.** Both are always surfaced as site tags,
-`region` and `group`, so an operator can still select "every branch site" or
-"everything in Gondor" whichever way the tree is drawn. They are bare keys rather
-than `tag_key_prefix` ones, because they are structural NetBox fields rather than
-NetBox tags — the same reason a device's `role` is bare.
+**The axis that loses is not lost.** The unchosen hierarchy is still a family in the
+catalogue, so it syncs, browses and searches like anything else — it simply does not
+become the parent of a site. Both are also edges on a site, so either can be followed
+from a site's detail page whichever way the tree is drawn.
 
 Two details worth knowing:
 
-- **Synthesized nodes carry a prefix** — `region:gondor`, `site-group:branch`.
-  NetBox slugs are unique per model, not globally, so a region and a site may both
-  be `gondor`; Hegemony keys sites on `(provider_id, external_id)`, and without the
-  prefix those two would collide into one row. Nodes are also tagged
-  `node_type=region` (or `site_group`), so a selector can tell an aggregation node
-  from a place with equipment in it.
-- **Only the ancestors of the sites you sync are emitted.** A NetBox region tree
-  can describe an entire estate; a provider scoped with `device_query` has no
-  business dragging all of it in.
+- **Nodes carry a prefix** — `region:1`, `site-group:4`. NetBox ids are unique per model,
+  not across them, so a region and a site may both be `4`; Hegemony keys sites on
+  `(provider_id, external_id)`, and without the prefix those two would collide into one
+  row that is its own parent.
+- **A hierarchy this instance does not serve flattens rather than dangles.** A NetBox
+  with its region endpoint trimmed away gives a flat site list, not a tree whose every
+  parent names a row nobody stored.
+
+The nodes are **real objects** now. Before projection the provider invented a site per
+region — rows that described nothing, could not be listed, and collided with a real site
+of the same slug. A region is a stored object with its own row and its own edge, so the
+tree is built from things that exist.
 
 NetBox **Locations** — the rooms and rack rows *inside* a site — are deliberately
 not part of the tree. They arrive as a device attribute (`location`) instead,
@@ -332,16 +334,40 @@ An operator's local columns — `maintenance_state_override`, `tags_local`, the 
 overlay — are never written here. Projection owns the provider-sourced columns and
 nothing else, exactly as the old device path did.
 
-A provider that has never been asked to describe itself has no bindings, and answers for
-its devices and sites the way it always did. Projection starts at the first discovery.
+#### Discover once, before the first sync
+
+**This is a breaking change for a provider upgraded from an earlier release.** The
+separate device and site reads are gone — `query_devices` and `list_sites` refuse, by
+design, with an error that names the fix:
+
+> This NetBox provider reads devices and sites as object families and the platform writes
+> them from the stored rows. Run Discover on this provider once so it can say which
+> families those are.
+
+The sync fails until Discover has run once. That is deliberate. The quiet alternative —
+declining to serve devices at all — would let the sync succeed while refreshing nothing,
+and the first anyone would know is a run targeting a device whose address changed weeks
+earlier. One loud failure that says what to do is the kinder one.
+
+Nothing else changes. Every provider setting still means what it meant: `device_query`
+still scopes which devices are read, `site_tree_source` still picks the hierarchy,
+`status_map`, `tag_key_prefix`, `default_access_config` and the `field_map` credential
+paths are all carried into the binding that discovery returns. A `field_map` entry that
+reaches into NetBox's raw payload in a way a stored attribute cannot express — `vendor`,
+`mgmt_host`, `site.external_id` — is reported as a discovery warning rather than silently
+ignored.
+
+One behaviour genuinely moves: a device's **asset tag, rack, position, tenant and
+location** used to be copied onto the device row's `descriptive`. They are attributes of
+the `device` object now, where they are searchable and filterable like any other family's.
 
 ### Relationships
 
 Families declare their edges, so a row points at what it belongs to: an interface at its
 device and its LAG, a prefix at its VLAN and VRF, a circuit at its carrier, a VM at its
-cluster. Edges cite the same external id the target row is keyed on — NetBox's numeric id
-for objects and devices, the site slug for sites — so they line up with what a device or
-site sync already stored.
+cluster. Edges cite the same external id the target row is keyed on — NetBox's numeric id for
+objects and devices, the site slug for sites — so an edge and the row it reaches can
+never disagree about the key.
 
 Polymorphic references are stored as data rather than as edges: an IP address keeps
 `assigned_object_type` and `assigned_object_id` as attributes, because one edge cannot
