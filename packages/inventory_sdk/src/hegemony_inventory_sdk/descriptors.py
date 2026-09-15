@@ -51,6 +51,23 @@ class ProviderCallContext:
     #: ``None`` means the provider is on its own, which is the case for every family it
     #: declared itself and for every provider that does not discover at all.
     object_mapping: ObjectFieldMapping | None = None
+    #: Return only what changed at or after this marker, if the provider can.
+    #:
+    #: The value is one the provider itself produced, in an earlier call, as a
+    #: descriptor's ``source_version["marker"]``; the platform kept the highest it saw
+    #: and hands it back. It is opaque here on purpose -- a NetBox timestamp, an
+    #: increasing revision, an opaque cursor -- because only the source knows how its own
+    #: ordering works.
+    #:
+    #: ``None`` means read everything, which is what a first sync does, what a provider
+    #: without :attr:`~.enums.Capability.DELTA` always does, and what the platform falls
+    #: back to on a schedule so that deletions are noticed.
+    #:
+    #: **At or after, not strictly after.** Two records can carry the same marker, so
+    #: excluding the boundary would drop whichever of them the last read did not reach.
+    #: Returning one record twice costs an upsert that changes nothing; missing one
+    #: leaves the platform wrong until the next full pass.
+    since: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +92,18 @@ class ObjectDescriptor:
     descriptive: dict[str, Any] = field(default_factory=dict)
     access_config: AccessConfig = field(default_factory=dict)
     relationships: tuple[ObjectRelationship, ...] = ()
+    #: Where this record stood in the source's own ordering when it was read.
+    #:
+    #: A provider that declares :attr:`~.enums.Capability.DELTA` puts a ``"marker"`` key
+    #: here -- NetBox uses its ``last_updated`` -- and the platform keeps the highest
+    #: marker it saw across the whole listing, then hands it back as
+    #: :attr:`ProviderCallContext.since` next time.
+    #:
+    #: The platform never parses it. It compares markers as strings and keeps the
+    #: greatest, which is correct for any format that sorts lexicographically in its own
+    #: order -- an ISO-8601 timestamp does, a zero-padded revision does. A provider whose
+    #: markers do not should not declare the capability, because the platform has no way
+    #: to tell.
     source_version: dict[str, Any] = field(default_factory=dict)
 
     @property

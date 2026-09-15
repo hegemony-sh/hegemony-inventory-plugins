@@ -108,9 +108,7 @@ def test_a_binding_rejects_a_transform_this_platform_cannot_perform() -> None:
 def test_a_binding_rejects_a_transform_on_a_field_that_projects_nothing() -> None:
     """A transform on a non-field is a declaration that can never run."""
     with pytest.raises(ValueError, match="transforms name no projected field"):
-        ProjectionBinding(
-            target="device", object_type="d", transforms={"site_edge": "host"}
-        )
+        ProjectionBinding(target="device", object_type="d", transforms={"site_edge": "host"})
 
 
 def test_an_edge_can_never_carry_a_transform() -> None:

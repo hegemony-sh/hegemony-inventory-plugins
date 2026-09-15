@@ -1360,3 +1360,148 @@ async def test_a_lying_content_length_does_not_get_past_the_running_total(
         )
 
     assert raised.value.envelope.safe_details["max_response_bytes"] == 64 * 1024
+
+
+@pytest.mark.asyncio
+async def test_a_read_with_no_marker_asks_for_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A first sync has nothing to narrow by, and must not narrow by anything."""
+    captured: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+
+    await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    assert "last_updated__gte" not in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_a_read_with_a_marker_asks_only_for_what_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The marker becomes a NetBox filter, inclusive of its own boundary.
+
+    ``__gte`` rather than ``__gt``: two objects saved in the same instant carry the same
+    timestamp, and excluding the boundary would drop whichever of them the previous read
+    did not reach. Re-reading one costs an upsert that changes nothing.
+    """
+    captured: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+
+    await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="auto_sync",
+            since="2026-09-15T12:00:00.000000Z",
+        ),
+    )
+
+    assert "last_updated__gte=2026-09-15T12%3A00%3A00.000000Z" in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_a_marker_narrows_rather_than_replaces_the_configured_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider scoped to part of an estate stays scoped to it when reading a delta.
+
+    Losing the configured filter here would widen a deliberately narrow provider to the
+    whole table on every delta pass, which is the opposite of what delta is for.
+    """
+    captured: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider({"object_queries": {"interface": "mgmt_only=false"}}, token="netbox-token")
+
+    await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(
+            provider_id="netbox:primary", operation="auto_sync", since="2026-09-15T12:00:00Z"
+        ),
+    )
+
+    assert "mgmt_only=false" in captured["url"]
+    assert "last_updated__gte" in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_every_object_carries_the_marker_the_next_delta_read_needs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Filtering by ``since`` and reporting no marker is the one unsafe combination.
+
+    The platform would go on asking for changes since a moment that never advanced, and
+    believe itself up to date while the source moved on.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": 7, "name": "eth0", "last_updated": "2026-09-15T12:00:00.123456Z"},
+                    {"id": 8, "name": "eth1", "last_updated": "2026-09-15T13:00:00.000000Z"},
+                ],
+                "next": None,
+            },
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    assert [obj.source_version["marker"] for obj in objects] == [
+        "2026-09-15T12:00:00.123456Z",
+        "2026-09-15T13:00:00.000000Z",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_record_without_a_timestamp_simply_carries_no_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin model may not stamp last_updated; that is a missing marker, not a crash.
+
+    The platform keeps the highest marker it saw, so a record contributing none just
+    does not raise the watermark -- and will be read again next time, which is right.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [{"id": 7, "name": "eth0"}], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    assert "marker" not in objects[0].source_version
+
+
+def test_netbox_declares_it_can_answer_what_changed() -> None:
+    """The capability is the promise core checks before asking for a delta at all."""
+    assert Capability.DELTA in _provider().capabilities

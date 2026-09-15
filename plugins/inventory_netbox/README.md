@@ -46,6 +46,8 @@ rendered automatically and `token_ref` gets a secret picker.
 | `timeout_seconds` | no | `10` | Per-request timeout |
 | `max_response_bytes` | no | `67108864` | Largest response body this provider will read. A timeout bounds how *long* a read may take; this bounds how *much* it may return, which is a different failure — a source answering steadily and forever never goes quiet. Generous by default because `/api/schema/` really is several megabytes. |
 
+**Reading only what changed.** This provider declares the `delta` capability: NetBox stamps `last_updated` on every object and filters on it, so when Hegemony hands back a marker the read becomes `?last_updated__gte=...`. `__gte` rather than `__gt` on purpose — two objects saved in the same instant share a timestamp, and excluding the boundary would drop whichever of them the previous read did not reach. A configured `object_queries` or `device_query` filter still applies, so a deliberately narrow provider stays narrow on a delta pass. Enabling it is the platform's setting, not this plugin's.
+
 Minimal config:
 
 ```json

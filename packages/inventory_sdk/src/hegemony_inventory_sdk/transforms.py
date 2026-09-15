@@ -76,7 +76,7 @@ def _first(value: Any) -> Any:
     becomes ``None``, which is what "there is no value here" already means everywhere
     else.
     """
-    if isinstance(value, str) or isinstance(value, Mapping):
+    if isinstance(value, str | Mapping):
         return value
     if isinstance(value, Sequence):
         return value[0] if value else None

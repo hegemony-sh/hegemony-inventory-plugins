@@ -171,7 +171,9 @@ class _FetchPlan:
 
 class NetBoxInventoryProvider(InventoryProvider):
     provider_type = "netbox"
-    capabilities = frozenset({Capability.READ, Capability.QUERY, Capability.DISCOVER})
+    capabilities = frozenset(
+        {Capability.READ, Capability.QUERY, Capability.DISCOVER, Capability.DELTA}
+    )
     # Every family in the catalogue, plus devices and sites. This is the whole space
     # the provider can read, and it is deliberately not narrowed per instance: which
     # of them a given provider actually syncs is the platform's own object-type
@@ -321,17 +323,45 @@ class NetBoxInventoryProvider(InventoryProvider):
                 object_type, query, limit=limit, cursor=cursor, context=context
             )
         items = await self._paginated(
-            self._object_path(plan, _query_to_expr(query)),
+            self._object_path(plan, self._with_since(_query_to_expr(query), context)),
             context,
             page_limit=self._services.limits.max_provider_pages,
             result_limit=limit or self._services.limits.max_run_targets,
         )
         return [
-            self._with_provider_url(descriptor, item)
+            self._with_marker(self._with_provider_url(descriptor, item), item)
             for descriptor, item in zip(
                 map_records(items, plan.mapping, provider_id=self.id), items, strict=True
             )
         ]
+
+    def _with_since(self, expr: str, context: ProviderCallContext) -> str:
+        """Narrow a read to what changed, when the platform handed back a marker.
+
+        NetBox stamps ``last_updated`` on every object and filters on it, so the whole
+        of delta reading here is one more query parameter. ``__gte`` rather than ``__gt``
+        deliberately: two objects saved in the same instant carry the same timestamp, and
+        excluding the boundary would drop whichever of them the previous page did not
+        reach. Re-reading one object costs an upsert that changes nothing.
+        """
+        if not context.since:
+            return expr
+        clause = f"last_updated__gte={quote(context.since, safe='')}"
+        return f"{expr}&{clause}" if expr else clause
+
+    @staticmethod
+    def _with_marker(descriptor: ObjectDescriptor, item: Mapping[str, Any]) -> ObjectDescriptor:
+        """Stamp where this record stood in NetBox's ordering, for the next delta read.
+
+        Without it the platform has nothing to carry back and every sync is a full one,
+        which is the safe failure rather than the silent one: a provider that filtered by
+        ``since`` and then reported no marker would leave the platform asking for changes
+        since a moment that never advanced.
+        """
+        marker = item.get("last_updated")
+        if not isinstance(marker, str) or not marker:
+            return descriptor
+        return replace(descriptor, source_version={**descriptor.source_version, "marker": marker})
 
     def _object_scope(self, plan: _FetchPlan) -> str:
         """The filter this provider always applies to a family, built in and configured.
