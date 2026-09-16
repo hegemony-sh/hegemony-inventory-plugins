@@ -36,7 +36,17 @@ __all__ = ["TRANSFORMABLE_FIELDS", "DiscoveryResult", "ProjectionBinding"]
 #: platform altered on the way past would no longer resolve to the row it was stored
 #: under -- which is the exact class of defect projection exists to remove.
 TRANSFORMABLE_FIELDS = frozenset(
-    {"name", "hostname", "vendor", "model", "platform", "serial", "maintenance_state"}
+    {
+        "name",
+        "hostname",
+        "device_hostname",
+        "vendor",
+        "model",
+        "platform",
+        "serial",
+        "location",
+        "maintenance_state",
+    }
 )
 
 
@@ -67,12 +77,15 @@ class ProjectionBinding:
     object_type: str
     #: Attribute path for the row's name. Defaults to the object's own name.
     name: str | None = None
-    #: Device only: management address, vendor, model, platform and serial.
+    #: Device only: management address, DNS hostname, vendor, model, platform and serial.
     hostname: str | None = None
+    device_hostname: str | None = None
     vendor: str | None = None
     model: str | None = None
     platform: str | None = None
     serial: str | None = None
+    #: Site only: location/address text.
+    location: str | None = None
     #: Device only: the relationship that reaches this device's site.
     site_edge: str | None = None
     #: Site only: the relationship that reaches this row's parent. The parent may be in
@@ -101,6 +114,8 @@ class ProjectionBinding:
     default_access_config: Mapping[str, Any] = field(default_factory=dict)
     #: Attribute paths copied into the row's tags, by tag key.
     tags: Mapping[str, str] = field(default_factory=dict)
+    #: Attribute paths copied into the row's descriptive metadata, by output key.
+    descriptive: Mapping[str, str] = field(default_factory=dict)
     #: Attribute path to a *list* whose entries each become a tag key set to ``"true"``.
     #:
     #: A source's own tags are usually a flat list of labels, while the platform filters
@@ -148,8 +163,10 @@ class ProjectionBinding:
             raise ValueError(
                 f"ProjectionBinding target must be 'device' or 'site': {self.target!r}"
             )
-        if self.target == "site" and (self.hostname or self.site_edge):
-            raise ValueError("ProjectionBinding: a site has no hostname and no site edge")
+        if self.target == "site" and (self.hostname or self.device_hostname or self.site_edge):
+            raise ValueError(
+                "ProjectionBinding: a site has no hostname, device hostname, or site edge"
+            )
         if self.target == "device" and self.parent_edge:
             raise ValueError("ProjectionBinding: a device has no parent edge; use site_edge")
         if self.tag_prefix and not self.tag_list:

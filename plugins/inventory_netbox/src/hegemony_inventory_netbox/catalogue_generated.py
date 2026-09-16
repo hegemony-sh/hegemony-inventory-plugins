@@ -8,7 +8,7 @@ Written by ``scripts/generate_catalogue.py`` from a recorded NetBox 4.3.0-Docker
 through the same deriver that reads a live instance. Change the deriver or the overlay
 and regenerate; editing this file by hand puts it beyond the reach of both.
 
-104 families, 1310 attributes, 211 relationships.
+104 families, 1312 attributes, 211 relationships.
 
 This is a *seed*, not the last word. A provider that has discovered its own instance
 uses what that instance said it serves; this is what it offers until then, and what it
@@ -812,6 +812,7 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
             object_type="device",
             name="name",
             hostname="primary_ip4",
+            device_hostname="name",
             vendor="vendor",
             model="device_type",
             platform="platform",
@@ -833,6 +834,7 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
                 "enable.password_ref": "custom_fields.hegemony_enable_password_ref",
             },
             tags={"role": "role"},
+            transforms={"hostname": ("host",)},
         ),
         attributes={
             "name": _text("name"),
@@ -3135,7 +3137,9 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
             target="site",
             object_type="region",
             name="name",
+            location="description",
             parent_edge="parent",
+            descriptive={"slug": "slug", "description": "description"},
             external_id_prefix="region:",
         ),
         attributes={
@@ -3187,7 +3191,13 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         columns=("name", "status", "slug", "region", "group", "tenant", "description"),
         search_fields=("name", "slug", "description"),
         binding=ProjectionBinding(
-            target="site", object_type="site", name="name", parent_edge="region"
+            target="site",
+            object_type="site",
+            name="name",
+            location="physical_address",
+            parent_edge="region",
+            tags={"region": "region_slug", "group": "group_slug"},
+            descriptive={"slug": "slug", "description": "description"},
         ),
         attributes={
             "name": _text("name", nullable=False),
@@ -3214,6 +3224,8 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
             "custom_fields": _json("custom_fields"),
             "created": _text("created"),
             "last_updated": _text("last_updated"),
+            "region_slug": _text("region.slug"),
+            "group_slug": _text("group.slug"),
         },
         relationships=(
             _rel("region", "region", "region.id"),

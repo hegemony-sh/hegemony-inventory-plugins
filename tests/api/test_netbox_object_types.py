@@ -175,6 +175,20 @@ def test_catalogue_ids_are_unique() -> None:
     assert tuple(sorted(ids)) == catalogue.ALL_OBJECT_TYPE_IDS
 
 
+def test_core_family_catalogue_bindings_keep_projection_metadata() -> None:
+    """The generated seed keeps every binding field declared by the overlay."""
+    device = catalogue.BY_ID["device"].binding
+    assert device is not None
+    assert device.device_hostname == "name"
+    assert device.transforms == {"hostname": ("host",)}
+
+    site = catalogue.BY_ID["site"].binding
+    assert site is not None
+    assert site.location == "physical_address"
+    assert site.tags == {"region": "region_slug", "group": "group_slug"}
+    assert site.descriptive == {"slug": "slug", "description": "description"}
+
+
 def test_every_family_is_grouped_under_its_netbox_app() -> None:
     """Fifty flat checkboxes are not a choice; the platform groups them by this."""
     for entry in catalogue.OBJECT_TYPES:

@@ -241,6 +241,68 @@ async def test_netbox_rejects_off_origin_pagination_before_sending_token(
     assert captured == [("netbox.example", "Bearer netbox-token")]
 
 
+@pytest.mark.asyncio
+async def test_sync_listing_is_not_truncated_by_the_run_target_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_pages: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_pages.append(
+            request.url.path + ("?" + request.url.query.decode() if request.url.query else "")
+        )
+        if request.url.params.get("page") == "2":
+            return httpx.Response(
+                200,
+                json={"results": [{"id": 2, "name": "eth1"}], "next": None},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "results": [{"id": 1, "name": "eth0"}],
+                "next": "https://netbox.example/api/dcim/interfaces/?page=2",
+            },
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+    provider._services.limits = InventoryLimits(
+        max_provider_pages=10,
+        max_run_targets=1,
+        max_preview_devices=1,
+    )
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    assert [obj.external_id for obj in objects] == ["1", "2"]
+    assert len(requested_pages) == 2
+
+
+def test_configured_projection_bindings_use_current_provider_settings() -> None:
+    provider = _provider(
+        {
+            "site_tree_source": "site_group",
+            "status_map": {"planned": "maintenance"},
+            "tag_key_prefix": "nb:",
+        }
+    )
+
+    bindings = {
+        binding.object_type: binding
+        for binding in provider.configured_projection_bindings(
+            {"device", "site", "region", "site_group"}
+        )
+    }
+
+    assert set(bindings) == {"device", "site", "site_group"}
+    assert bindings["site"].parent_edge == "group"
+    assert bindings["device"].maintenance_state_map == {"planned": "maintenance"}
+    assert bindings["device"].tag_prefix == "nb:"
+
+
 def test_netbox_config_normalizes_field_map_entries() -> None:
     config = NetBoxProviderConfig.model_validate(
         {

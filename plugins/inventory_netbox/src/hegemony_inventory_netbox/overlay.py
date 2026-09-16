@@ -260,6 +260,12 @@ REPLACED_FIELDS: Mapping[str, tuple[ReplacedField, ...]] = MappingProxyType(
 EXTRA_ATTRIBUTES: Mapping[str, Mapping[str, str]] = MappingProxyType(
     {
         "/api/dcim/devices/": MappingProxyType({"vendor": "device_type.manufacturer.name"}),
+        # The ordinary region/group attributes carry names for browsing. Projection
+        # preserves the previous provider contract by keeping their stable slugs as
+        # filterable site tags too.
+        "/api/dcim/sites/": MappingProxyType(
+            {"region_slug": "region.slug", "group_slug": "group.slug"}
+        ),
     }
 )
 
@@ -285,6 +291,7 @@ BINDINGS: Mapping[str, ProjectionBinding] = MappingProxyType(
             object_type="device",
             name="name",
             hostname="primary_ip4",
+            device_hostname="name",
             vendor="vendor",
             model="device_type",
             platform="platform",
@@ -310,6 +317,9 @@ BINDINGS: Mapping[str, ProjectionBinding] = MappingProxyType(
             object_type="site",
             name="name",
             parent_edge="region",
+            location="physical_address",
+            tags={"region": "region_slug", "group": "group_slug"},
+            descriptive={"slug": "slug", "description": "description"},
         ),
         "/api/dcim/regions/": ProjectionBinding(
             target="site",
@@ -317,6 +327,8 @@ BINDINGS: Mapping[str, ProjectionBinding] = MappingProxyType(
             name="name",
             parent_edge="parent",
             external_id_prefix="region:",
+            location="description",
+            descriptive={"slug": "slug", "description": "description"},
         ),
     }
 )
@@ -535,6 +547,8 @@ SITE_TREE_BINDINGS: Mapping[str, tuple[str, str, ProjectionBinding]] = MappingPr
                 name="name",
                 parent_edge="parent",
                 external_id_prefix="region:",
+                location="description",
+                descriptive={"slug": "slug", "description": "description"},
             ),
         ),
         "site_group": (
@@ -546,6 +560,8 @@ SITE_TREE_BINDINGS: Mapping[str, tuple[str, str, ProjectionBinding]] = MappingPr
                 name="name",
                 parent_edge="parent",
                 external_id_prefix="site-group:",
+                location="description",
+                descriptive={"slug": "slug", "description": "description"},
             ),
         ),
     }

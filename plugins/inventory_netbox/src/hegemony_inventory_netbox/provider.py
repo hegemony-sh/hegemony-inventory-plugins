@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from time import monotonic
 from typing import Any
@@ -26,6 +26,7 @@ from hegemony_inventory_sdk import (
     ObjectDescriptor,
     ObjectFieldMapping,
     PlatformServices,
+    ProjectionBinding,
     ProviderCallContext,
     ProviderErrorCode,
     ProviderErrorEnvelope,
@@ -192,6 +193,24 @@ class NetBoxInventoryProvider(InventoryProvider):
         self._services = services
         self._object_sources: dict[str, NetBoxObjectType] = sources_for(ALL_OBJECT_TYPE_IDS)
 
+    def configured_projection_bindings(
+        self, object_types: Iterable[str]
+    ) -> tuple[ProjectionBinding, ...]:
+        """Rebuild discovered bindings from the provider's current configuration.
+
+        Discovery proves which families this instance serves. Settings such as the site
+        tree, status map, credential fields, and tag prefix remain ordinary mutable
+        provider configuration and must take effect on the next sync rather than being
+        frozen into the discovery snapshot.
+        """
+        served = {
+            source.endpoint
+            for object_type in object_types
+            if (source := self._object_sources.get(object_type)) is not None
+        }
+        composed = bindings_for(self.config, served=served)
+        return tuple(composed[endpoint] for endpoint in sorted(served) if endpoint in composed)
+
     async def list(
         self,
         resource_type: ResourceType,
@@ -326,7 +345,9 @@ class NetBoxInventoryProvider(InventoryProvider):
             self._object_path(plan, self._with_since(_query_to_expr(query), context)),
             context,
             page_limit=self._services.limits.max_provider_pages,
-            result_limit=limit or self._services.limits.max_run_targets,
+            # None means a complete synchronization listing. Preview callers pass their
+            # own explicit cap; max_run_targets limits one run, not inventory size.
+            result_limit=limit,
         )
         return [
             self._with_marker(self._with_provider_url(descriptor, item), item)

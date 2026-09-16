@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import builtins
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .descriptors import (
@@ -29,7 +29,7 @@ from .descriptors import (
     device_to_object_descriptor,
     site_to_object_descriptor,
 )
-from .discovery import DiscoveryResult
+from .discovery import DiscoveryResult, ProjectionBinding
 from .enums import Capability, ResourceType
 from .errors import not_supported
 
@@ -167,6 +167,17 @@ class InventoryProvider(ABC):
         so the platform calls it on demand and stores the answer, rather than per sync.
         """
         raise not_supported(self.id, self.provider_type, "discover")
+
+    def configured_projection_bindings(
+        self, object_types: Iterable[str]
+    ) -> tuple[ProjectionBinding, ...] | None:
+        """Rebuild discovered projection bindings from current mutable configuration.
+
+        Discovery still decides which object families this instance serves. Override
+        this when ordinary provider settings influence how those families project at
+        sync time. Returning None keeps the bindings stored during discovery.
+        """
+        return None
 
     # ── Optional future capabilities ──
 
