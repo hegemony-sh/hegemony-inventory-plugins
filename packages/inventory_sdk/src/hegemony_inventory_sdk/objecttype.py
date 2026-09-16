@@ -16,6 +16,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from .identifiers import validate_object_type_id
+
 
 @dataclass(frozen=True, slots=True)
 class ObjectTypeRelationshipSpec:
@@ -42,6 +44,13 @@ class ObjectTypeUIHints:
     default_sort: str | None = None
     custom_component: str | None = None
 
+    def __post_init__(self) -> None:
+        # Plugin JavaScript is never loaded. Until the core publishes an explicit
+        # component allow-list, accepting an arbitrary id advertises a renderer that
+        # cannot exist.
+        if self.custom_component is not None:
+            raise ValueError("custom_component is not supported by this SDK ABI")
+
 
 @dataclass(frozen=True, slots=True)
 class ObjectTypeSpec:
@@ -59,6 +68,14 @@ class ObjectTypeSpec:
     identity_keys: tuple[str, ...] = ()
     relationships: tuple[ObjectTypeRelationshipSpec, ...] = ()
     ui: ObjectTypeUIHints = field(default_factory=ObjectTypeUIHints)
+
+    def __post_init__(self) -> None:
+        validate_object_type_id(self.id)
+        for relationship in self.relationships:
+            validate_object_type_id(
+                relationship.target_object_type,
+                field_name=f"relationship {relationship.rel!r} target_object_type",
+            )
 
     @classmethod
     def from_model(

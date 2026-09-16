@@ -39,10 +39,10 @@ rendered automatically and `token_ref` gets a secret picker.
 | `site_tree_source` | no | `region` | Which NetBox hierarchy becomes the site tree: `region`, `site_group` or `none`. The other axis is still tagged |
 | `tag_key_prefix` | no | `tag:` | Prefix for NetBox tag slugs surfaced as filterable device tags. Set to `""` for bare keys |
 | `status_map` | no | built-in | Maps a NetBox device status slug to a maintenance state (`active`, `maintenance`, `disabled`) |
-| `field_map` | no | built-in | Maps normalized inventory fields → NetBox REST payload paths, including optional `access_config.*` refs under `custom_fields` |
+| `field_map` | no | built-in | Maps credential-reference fields (`access_config.*`) to NetBox custom-field paths; historical non-credential defaults are accepted but ignored |
 | `default_access_config` | no | `{}` | Access-config defaults applied to every device |
 | `object_queries` | no | `{}` | Per-family NetBox filter, e.g. `{"interface": "mgmt_only=false"}` — `device_query` for everything that is not a device |
-| `query_cache_ttl_seconds` | no | `null` | Optional query cache TTL (0–86400 s) |
+| `page_size` | no | `100` | Records requested per NetBox API page (1–1000) |
 | `timeout_seconds` | no | `10` | Per-request timeout |
 | `max_response_bytes` | no | `67108864` | Largest response body this provider will read. A timeout bounds how *long* a read may take; this bounds how *much* it may return, which is a different failure — a source answering steadily and forever never goes quiet. Generous by default because `/api/schema/` really is several megabytes. |
 

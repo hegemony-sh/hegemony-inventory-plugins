@@ -11,6 +11,7 @@ never import Hegemony app internals.
 from __future__ import annotations
 
 from ._version import SDK_ABI_VERSION, __version__
+from .access import ACCESS_CONFIG_JSON_SCHEMA, AccessConfigModel
 from .constants import DEFAULT_DEVICE_MGMT_PORT, DEFAULT_DEVICE_PLATFORM
 from .descriptors import (
     AccessConfig,
@@ -28,6 +29,11 @@ from .descriptors import (
 from .discovery import TRANSFORMABLE_FIELDS, DiscoveryResult, ProjectionBinding
 from .enums import Capability, MaintenanceState, ProviderErrorCode, ResourceType
 from .errors import InventoryProviderError, ProviderErrorEnvelope, not_supported
+from .identifiers import (
+    OBJECT_TYPE_ID_MAX_LENGTH,
+    OBJECT_TYPE_ID_PATTERN,
+    validate_object_type_id,
+)
 from .mapping import (
     ObjectFieldMapping,
     RelationshipMapping,
@@ -54,7 +60,9 @@ __all__ = [
     "DEFAULT_DEVICE_MGMT_PORT",
     "DEFAULT_DEVICE_PLATFORM",
     "SDK_ABI_VERSION",
+    "ACCESS_CONFIG_JSON_SCHEMA",
     "AccessConfig",
+    "AccessConfigModel",
     "Capability",
     "ChangeEvent",
     "DeviceDescriptor",
@@ -68,6 +76,8 @@ __all__ = [
     "InventoryProviderError",
     "MaintenanceState",
     "ObjectDescriptor",
+    "OBJECT_TYPE_ID_MAX_LENGTH",
+    "OBJECT_TYPE_ID_PATTERN",
     "ObjectFieldMapping",
     "ObjectRelationship",
     "ObjectTypeRelationshipSpec",
@@ -92,4 +102,5 @@ __all__ = [
     "map_records",
     "not_supported",
     "site_to_object_descriptor",
+    "validate_object_type_id",
 ]

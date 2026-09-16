@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .descriptors import ObjectDescriptor, ObjectRelationship
+from .identifiers import validate_object_type_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,12 @@ class RelationshipMapping:
     rel: str
     target_object_type: str
     source: str  # dotted path to the related object's external id
+
+    def __post_init__(self) -> None:
+        validate_object_type_id(
+            self.target_object_type,
+            field_name=f"relationship {self.rel!r} target_object_type",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +63,9 @@ class ObjectFieldMapping:
     #: it will need (a REST path, a GraphQL type name) and reads it back on the next
     #: call. Values are strings so the whole mapping round-trips through JSON unchanged.
     source: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        validate_object_type_id(self.object_type)
 
 
 def extract_path(record: Mapping[str, Any], path: str) -> Any:

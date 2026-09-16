@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import builtins
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from typing import Any
 
 from .descriptors import (
@@ -147,6 +147,20 @@ class InventoryProvider(ABC):
             getattr(self, "provider_type", "unknown"),
             f"get_object:{object_type}",
         )
+
+    async def iter_object_pages(
+        self,
+        object_type: str,
+        query: Mapping[str, Any] | None = None,
+        *,
+        context: ProviderCallContext,
+    ) -> AsyncIterator[builtins.list[ObjectDescriptor]]:
+        """Yield complete provider pages without buffering a family in core.
+
+        Existing providers remain compatible: the default yields their ordinary
+        list_objects result once. Large providers should override this method.
+        """
+        yield await self.list_objects(object_type, query, context=context)
 
     # ── Optional capabilities ──
 

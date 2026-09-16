@@ -10,9 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
-from hegemony_inventory_sdk import MaintenanceState
-
-from .object_types import ALL_OBJECT_TYPE_IDS, BY_ID
+from hegemony_inventory_sdk import MaintenanceState, validate_object_type_id
 
 # NetBox device statuses -> the platform's MaintenanceState. "Gone or going" is
 # disabled; "not yet in service" is maintenance. Anything unlisted (including
@@ -132,7 +130,14 @@ class NetBoxProviderConfig(BaseModel):
             "(active, maintenance or disabled). Statuses left out stay active."
         ),
     )
-    field_map: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_FIELD_MAP))
+    field_map: dict[str, str] = Field(
+        default_factory=lambda: {
+            key: value
+            for key, value in DEFAULT_FIELD_MAP.items()
+            if key.startswith("access_config.")
+        },
+        description="Credential-reference paths. Legacy non-credential defaults are ignored.",
+    )
     default_access_config: dict[str, Any] = Field(default_factory=dict)
     object_queries: dict[str, str] = Field(
         default_factory=dict,
@@ -143,7 +148,12 @@ class NetBoxProviderConfig(BaseModel):
             "query is appended to the configured one."
         ),
     )
-    query_cache_ttl_seconds: int | None = Field(None, ge=0, le=86400)
+    page_size: int = Field(
+        100,
+        ge=1,
+        le=1000,
+        description="Number of NetBox records requested per API page.",
+    )
     timeout_seconds: float = Field(10.0, gt=0, le=120)
     max_response_bytes: int = Field(
         64 * 1024 * 1024,
@@ -216,8 +226,12 @@ class NetBoxProviderConfig(BaseModel):
         would otherwise reject it outright rather than ignore a key that no longer means
         anything.
         """
-        if isinstance(value, dict) and "object_types" in value:
-            value = {key: item for key, item in value.items() if key != "object_types"}
+        if isinstance(value, dict):
+            value = {
+                key: item
+                for key, item in value.items()
+                if key not in {"object_types", "query_cache_ttl_seconds"}
+            }
         return value
 
     @field_validator("object_queries")
@@ -232,7 +246,9 @@ class NetBoxProviderConfig(BaseModel):
             key = object_type.strip()
             if not key:
                 continue
-            if key not in BY_ID:
+            try:
+                validate_object_type_id(key)
+            except ValueError:
                 unknown.append(key)
                 continue
             expression = str(query).strip().lstrip("?").strip() if query is not None else ""
@@ -240,8 +256,7 @@ class NetBoxProviderConfig(BaseModel):
                 normalized[key] = expression
         if unknown:
             raise ValueError(
-                f"object_queries has unknown NetBox object type(s): {', '.join(sorted(unknown))}. "
-                f"Valid ids are: {', '.join(ALL_OBJECT_TYPE_IDS)}"
+                f"object_queries has invalid object type id(s): {', '.join(sorted(unknown))}"
             )
         return normalized
 
@@ -275,8 +290,19 @@ class NetBoxProviderConfig(BaseModel):
                 continue
             stripped_key = key.strip()
             stripped_path = path.strip()
-            if stripped_key and stripped_path:
-                normalized[stripped_key] = stripped_path
+            if not stripped_key or not stripped_path:
+                continue
+            if stripped_key not in DEFAULT_FIELD_MAP:
+                raise ValueError(f"field_map has unknown key: {stripped_key}")
+            if not stripped_key.startswith("access_config."):
+                if stripped_path != DEFAULT_FIELD_MAP[stripped_key]:
+                    raise ValueError(
+                        f"field_map.{stripped_key} cannot be overridden; projection "
+                        "reads the normalized object attribute"
+                    )
+                # Accept historical full defaults without retaining dead controls.
+                continue
+            normalized[stripped_key] = stripped_path
         return normalized
 
     def safe_config(self) -> dict[str, Any]:

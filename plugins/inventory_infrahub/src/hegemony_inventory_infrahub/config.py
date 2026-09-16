@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 DEFAULT_FIELD_MAP = {
     "external_id": "id",
@@ -38,8 +38,15 @@ class InfrahubProviderConfig(BaseModel):
     device_kind: str = Field("InfraDevice", min_length=1, max_length=255)
     field_map: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_FIELD_MAP))
     default_access_config: dict[str, Any] = Field(default_factory=dict)
-    query_cache_ttl_seconds: int | None = Field(None, ge=0, le=86400)
     timeout_seconds: float = Field(10.0, gt=0, le=120)
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_retired_cache_ttl(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "query_cache_ttl_seconds" in value:
+            value = dict(value)
+            value.pop("query_cache_ttl_seconds", None)
+        return value
 
     @field_validator("token_ref")
     @classmethod

@@ -9,10 +9,11 @@ from __future__ import annotations
 import asyncio
 import builtins
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 from urllib.parse import ParseResult, quote, urlencode, urljoin, urlparse
 
 import httpx
@@ -38,8 +39,8 @@ from hegemony_inventory_sdk import (
     map_records,
 )
 
-from .bindings import bindings_for, unsupported_field_map_keys
-from .config import DEFAULT_FIELD_MAP, NetBoxProviderConfig
+from .bindings import bindings_for
+from .config import NetBoxProviderConfig
 from .derive import (
     DerivedCatalogue,
     DiscoveryReport,
@@ -79,56 +80,6 @@ def _optional_str(value: Any) -> str | None:
         return None
     stripped = str(value).strip()
     return stripped or None
-
-
-def _lookup_path(payload: Mapping[str, Any], path: str) -> Any:
-    value: Any = payload
-    for part in path.split("."):
-        if isinstance(value, Mapping):
-            value = value.get(part)
-        elif isinstance(value, list):
-            collected = []
-            for item in value:
-                if isinstance(item, Mapping):
-                    collected.append(item.get(part))
-            value = collected
-        else:
-            return None
-    return value
-
-
-def _assign_nested(target: dict[str, Any], path: str, value: Any) -> None:
-    parts = [part.strip() for part in path.split(".") if part.strip()]
-    if not parts:
-        return
-
-    current = target
-    for part in parts[:-1]:
-        next_value = current.get(part)
-        if not isinstance(next_value, dict):
-            next_value = {}
-            current[part] = next_value
-        current = next_value
-    current[parts[-1]] = value
-
-
-# NetBox keeps TWO independent nested hierarchies above a site -- Region
-# (geography) and SiteGroup (function) -- and a site carries a nullable foreign
-# key to each. A platform Site has a single ``parent_id``, so the two cannot both
-# be projected onto it: combining them would mean inventing "Region x Group"
-# nodes that exist in neither system. ``site_tree_source`` picks one; the other
-# is surfaced as a site tag, so the choice never loses information.
-#
-# NetBox slugs are unique per model rather than globally -- a region and a site
-# may both be "gondor" -- and the platform keys sites on (provider_id,
-# external_id), so the synthesized nodes carry a prefix. It must be the same
-# prefix everywhere: in the parent link, in the node's own id, and in _get_site.
-#
-# config value -> (site payload key, list endpoint, external-id prefix, node kind)
-_SITE_TREE_SOURCES: dict[str, tuple[str, str, str, str]] = {
-    "region": ("region", "/api/dcim/regions/", "region:", "region"),
-    "site_group": ("group", "/api/dcim/site-groups/", "site-group:", "site_group"),
-}
 
 
 def _with_discovered_paths(
@@ -356,6 +307,30 @@ class NetBoxInventoryProvider(InventoryProvider):
             )
         ]
 
+    async def iter_object_pages(
+        self,
+        object_type: str,
+        query: Mapping[str, Any] | None = None,
+        *,
+        context: ProviderCallContext,
+    ) -> AsyncIterator[builtins.list[ObjectDescriptor]]:
+        plan = self._fetch_plan(object_type, context)
+        if plan is None:
+            yield await super().list_objects(object_type, query, context=context)
+            return
+        path = self._object_path(plan, self._with_since(_query_to_expr(query), context))
+        async for items in self._iter_paginated(
+            path,
+            context,
+            page_limit=self._services.limits.max_provider_pages,
+        ):
+            yield [
+                self._with_marker(self._with_provider_url(descriptor, item), item)
+                for descriptor, item in zip(
+                    map_records(items, plan.mapping, provider_id=self.id), items, strict=True
+                )
+            ]
+
     def _with_since(self, expr: str, context: ProviderCallContext) -> str:
         """Narrow a read to what changed, when the platform handed back a marker.
 
@@ -563,7 +538,6 @@ class NetBoxInventoryProvider(InventoryProvider):
         # whose regions were trimmed gets a flat site list rather than a binding that
         # projects from rows which never arrive.
         composed = bindings_for(self.config, served={entry.endpoint for entry in catalogue})
-        unmappable = unsupported_field_map_keys(self.config)
         return DiscoveryResult(
             source_version=derived.source_version,
             object_types=tuple(entry.spec for entry in catalogue),
@@ -571,19 +545,7 @@ class NetBoxInventoryProvider(InventoryProvider):
             bindings=tuple(
                 composed[entry.endpoint] for entry in catalogue if entry.endpoint in composed
             ),
-            # What the deriver could not interpret, plus any field this provider is
-            # configured to remap that a binding cannot express. Both are shapes the
-            # provider cannot honour, which is what this field is for -- and a silently
-            # ignored credential mapping is exactly the kind of thing an operator needs
-            # told rather than left to discover from a failed run.
-            warnings=(
-                *derived.warnings,
-                *(
-                    f"field_map.{key} is set but projection cannot honour it; "
-                    "the stored object fixes this attribute"
-                    for key in unmappable
-                ),
-            ),
+            warnings=derived.warnings,
         )
 
     async def _fetch_derived(
@@ -624,7 +586,13 @@ class NetBoxInventoryProvider(InventoryProvider):
             return None
         return compare_to_catalogue(derived, custom_fields=len(custom_fields))
 
-    async def _request_json(self, path_or_url: str, context: ProviderCallContext) -> dict[str, Any]:
+    async def _request_json(
+        self,
+        path_or_url: str,
+        context: ProviderCallContext,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> dict[str, Any]:
         await self._services.validate_url(str(self.config.url), operation=context.operation)
         url = self._request_url(path_or_url, context.operation)
         token = await self._services.resolve_secret_ref(
@@ -632,11 +600,15 @@ class NetBoxInventoryProvider(InventoryProvider):
         )
         authorization_values = self._authorization_header_values(token)
         retry_attempts = 4
-        async with httpx.AsyncClient(
-            timeout=self.config.timeout_seconds,
-            verify=self.config.verify_tls,
-            follow_redirects=False,
-        ) as client:
+        async with AsyncExitStack() as stack:
+            if client is None:
+                client = await stack.enter_async_context(
+                    httpx.AsyncClient(
+                        timeout=self.config.timeout_seconds,
+                        verify=self.config.verify_tls,
+                        follow_redirects=False,
+                    )
+                )
             for attempt in range(retry_attempts):
                 for auth_index, authorization in enumerate(authorization_values):
                     headers = {"Authorization": authorization} if authorization else {}
@@ -853,6 +825,65 @@ class NetBoxInventoryProvider(InventoryProvider):
             safe_details=safe_details,
         )
 
+    def _page_sized(self, path: str) -> str:
+        if any(part.partition("=")[0] == "limit" for part in urlparse(path).query.split("&")):
+            return path
+        separator = "&" if "?" in path else "?"
+        return f"{path}{separator}limit={self.config.page_size}"
+
+    async def _iter_paginated(
+        self,
+        path: str,
+        context: ProviderCallContext,
+        *,
+        page_limit: int,
+    ) -> AsyncIterator[builtins.list[dict[str, Any]]]:
+        next_url: str | None = self._page_sized(path)
+        pages = 0
+        async with httpx.AsyncClient(
+            timeout=self.config.timeout_seconds,
+            verify=self.config.verify_tls,
+            follow_redirects=False,
+        ) as client:
+            while next_url:
+                pages += 1
+                if pages > page_limit:
+                    raise self._error(
+                        ProviderErrorCode.PAGINATION_FAILED,
+                        "NetBox pagination limit exceeded",
+                        context.operation,
+                        safe_details={"page": pages},
+                    )
+                page = await self._request_json(next_url, context, client=client)
+                raw_results = page.get("results")
+                if not isinstance(raw_results, list):
+                    raise self._error(
+                        ProviderErrorCode.PAGINATION_FAILED,
+                        "NetBox pagination response is malformed",
+                        context.operation,
+                        safe_details={"page": pages},
+                    )
+                records: builtins.list[dict[str, Any]] = []
+                for index, item in enumerate(raw_results):
+                    if not isinstance(item, dict):
+                        raise self._error(
+                            ProviderErrorCode.PAGINATION_FAILED,
+                            "NetBox pagination result is not an object",
+                            context.operation,
+                            safe_details={"page": pages, "result_index": index},
+                        )
+                    records.append(cast(dict[str, Any], item))
+                yield records
+                next_raw = page.get("next")
+                if next_raw is not None and not isinstance(next_raw, str):
+                    raise self._error(
+                        ProviderErrorCode.PAGINATION_FAILED,
+                        "NetBox pagination next link is malformed",
+                        context.operation,
+                        safe_details={"page": pages},
+                    )
+                next_url = next_raw if isinstance(next_raw, str) and next_raw else None
+
     async def _paginated(
         self, path: str, context: ProviderCallContext, *, page_limit: int, result_limit: int | None
     ) -> builtins.list[dict[str, Any]]:
@@ -865,29 +896,10 @@ class NetBoxInventoryProvider(InventoryProvider):
         returning a short answer that looks like the full one.
         """
         items: builtins.list[dict[str, Any]] = []
-        next_url: str | None = path
-        pages = 0
-        while next_url:
-            pages += 1
-            if pages > page_limit:
-                raise self._error(
-                    ProviderErrorCode.PAGINATION_FAILED,
-                    "NetBox pagination limit exceeded",
-                    context.operation,
-                )
-            page = await self._request_json(next_url, context)
-            raw_results = page.get("results", page if isinstance(page, list) else [])
-            if not isinstance(raw_results, list):
-                raise self._error(
-                    ProviderErrorCode.PAGINATION_FAILED,
-                    "NetBox pagination response is malformed",
-                    context.operation,
-                )
-            items.extend([item for item in raw_results if isinstance(item, dict)])
+        async for records in self._iter_paginated(path, context, page_limit=page_limit):
+            items.extend(records)
             if result_limit is not None and len(items) >= result_limit:
                 return items[:result_limit]
-            next_raw = page.get("next") if isinstance(page, dict) else None
-            next_url = next_raw if isinstance(next_raw, str) and next_raw else None
         return items
 
     def _with_provider_url(
@@ -919,33 +931,6 @@ class NetBoxInventoryProvider(InventoryProvider):
             path = parsed.path.replace("/api/", "/", 1) if key == "url" else parsed.path
             return f"{parsed.scheme}://{parsed.netloc}{path}"
         return None
-
-    def _site_id_path(self) -> str:
-        """The site-payload path holding a site's external id.
-
-        Derived from the same ``field_map['site.external_id']`` entry ``_map_device``
-        reads, minus its leading ``site.`` segment, so a site fetched from
-        ``/api/dcim/sites/`` and the same site nested inside a device key on the
-        identical value. When the two disagreed (numeric ``id`` here, ``slug``
-        there) the platform materialized every NetBox site twice and attached
-        devices to the copy that carried no parent link or location.
-        """
-        path = (
-            self.config.field_map.get("site.external_id") or DEFAULT_FIELD_MAP["site.external_id"]
-        )
-        prefix, separator, remainder = path.partition(".")
-        if separator and prefix == "site" and remainder:
-            return remainder
-        return path
-
-    def _site_external_id(self, item: Mapping[str, Any]) -> str | None:
-        """Resolve one site payload's external id through :meth:`_site_id_path`."""
-        return (
-            _optional_str(_lookup_path(item, self._site_id_path()))
-            or _optional_str(item.get("id"))
-            or _optional_str(item.get("slug"))
-            or _optional_str(item.get("name"))
-        )
 
     def _error(
         self,

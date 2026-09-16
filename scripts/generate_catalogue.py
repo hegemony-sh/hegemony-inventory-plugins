@@ -136,6 +136,10 @@ _BINDING_FIELDS: tuple[str, ...] = (
     "name",
     "hostname",
     "device_hostname",
+    "hostname_fallbacks",
+    "display_name",
+    "mgmt_port",
+    "default_mgmt_port",
     "vendor",
     "model",
     "platform",
@@ -151,6 +155,7 @@ _BINDING_FIELDS: tuple[str, ...] = (
     "descriptive",
     "tag_list",
     "tag_prefix",
+    "native_tags",
     "external_id_prefix",
     "transforms",
 )

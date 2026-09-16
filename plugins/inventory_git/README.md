@@ -43,7 +43,6 @@ of the Git repositories you have added.
 | `path` | yes | — | Repo-relative path to the **inventory directory** (the one containing `sites/` and `devices/`) |
 | `default_access_config` | no | `{}` | Access-config defaults applied to every device |
 | `refresh_strategy` | no | `cache_ttl` | Cache strategy (currently the only value) |
-| `query_cache_ttl_seconds` | no | `null` | Optional query cache TTL (0–86400 s) |
 
 Example config:
 

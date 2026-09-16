@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from hegemony_inventory_netbox.bindings import bindings_for, unsupported_field_map_keys
+from hegemony_inventory_netbox.bindings import bindings_for
 from hegemony_inventory_netbox.config import DEFAULT_FIELD_MAP, NetBoxProviderConfig
 from hegemony_inventory_sdk import ProjectionBinding
 
@@ -110,19 +110,13 @@ def test_provider_defaults_travel_as_literals() -> None:
     assert binding.default_access_config == {"ssh": {"port": 2222}}
 
 
-def test_a_field_map_entry_a_binding_cannot_honour_is_named() -> None:
-    """Told, not dropped.
-
-    ``vendor`` was a two-level reach into NetBox's raw payload; the stored object fixes
-    it. An operator who remapped it is going to get the catalogue's value regardless, and
-    should hear that from discovery rather than from a column that looks wrong.
-    """
-    config = _config(field_map={**DEFAULT_FIELD_MAP, "vendor": "custom_fields.made_by"})
-
-    assert unsupported_field_map_keys(config) == ("vendor",)
+def test_a_field_map_entry_projection_cannot_honour_is_rejected() -> None:
+    with pytest.raises(ValueError, match="field_map.vendor cannot be overridden"):
+        _config(field_map={**DEFAULT_FIELD_MAP, "vendor": "custom_fields.made_by"})
 
 
-def test_an_untouched_field_map_warns_about_nothing() -> None:
-    """Warning about a default would mean every provider warns, which is no warning."""
-    assert unsupported_field_map_keys(_config()) == ()
-    assert unsupported_field_map_keys(_config(field_map=dict(DEFAULT_FIELD_MAP))) == ()
+def test_historical_defaults_are_accepted_but_only_credentials_remain() -> None:
+    config = _config(field_map=dict(DEFAULT_FIELD_MAP))
+
+    assert config.field_map
+    assert all(key.startswith("access_config.") for key in config.field_map)

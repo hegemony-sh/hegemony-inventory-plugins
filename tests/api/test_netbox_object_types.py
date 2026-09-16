@@ -180,6 +180,17 @@ def test_core_family_catalogue_bindings_keep_projection_metadata() -> None:
     device = catalogue.BY_ID["device"].binding
     assert device is not None
     assert device.device_hostname == "name"
+    assert device.hostname_fallbacks == ("primary_ip6",)
+    assert device.display_name == "display"
+    assert device.native_tags == "tags"
+    assert device.descriptive == {
+        "asset_tag": "asset_tag",
+        "rack": "rack",
+        "position": "position",
+        "tenant": "tenant",
+        "location": "location",
+        "mgmt_host_v6": "primary_ip6",
+    }
     assert device.transforms == {"hostname": ("host",)}
 
     site = catalogue.BY_ID["site"].binding
@@ -362,9 +373,9 @@ async def test_a_configured_query_scopes_a_family_and_a_caller_query_narrows_it(
     await provider.list_objects("ip_prefix", context=_context("list_objects:ip_prefix"))
 
     assert urls == [
-        "https://netbox.example/api/dcim/interfaces/?mgmt_only=false",
-        "https://netbox.example/api/dcim/interfaces/?mgmt_only=false&device_id=7",
-        "https://netbox.example/api/ipam/prefixes/?status=active",
+        "https://netbox.example/api/dcim/interfaces/?mgmt_only=false&limit=100",
+        "https://netbox.example/api/dcim/interfaces/?mgmt_only=false&device_id=7&limit=100",
+        "https://netbox.example/api/ipam/prefixes/?status=active&limit=100",
     ]
 
 
@@ -423,8 +434,8 @@ async def test_get_object_cannot_escape_the_family_scope(
 
     # Both reads went to the filtered list endpoint, never to /interfaces/<id>/.
     assert urls == [
-        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=41",
-        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=99",
+        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=41&limit=100",
+        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=99&limit=100",
     ]
 
 
@@ -677,10 +688,9 @@ def test_the_config_rejects_families_nothing_serves_and_forgets_the_retired_sett
     base = {"url": "https://netbox.example", "token_ref": "vault://netbox/token"}
 
     with pytest.raises(ValidationError) as query_error:
-        NetBoxProviderConfig.model_validate({**base, "object_queries": {"nope": "x=1"}})
+        NetBoxProviderConfig.model_validate({**base, "object_queries": {"Not Valid!": "x=1"}})
     message = str(query_error.value)
-    assert "nope" in message  # the typo is named...
-    assert "interface" in message  # ...and the valid ids are listed
+    assert "Not Valid!" in message
 
     # A config written while this plugin still had its own object-type setting must
     # keep validating: extra="forbid" would otherwise reject it outright.

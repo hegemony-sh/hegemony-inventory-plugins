@@ -10,7 +10,7 @@ from pathlib import PurePosixPath
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class GitInventoryProviderConfig(BaseModel):
@@ -30,7 +30,14 @@ class GitInventoryProviderConfig(BaseModel):
     )
     default_access_config: dict[str, Any] = Field(default_factory=dict)
     refresh_strategy: Literal["cache_ttl"] = "cache_ttl"
-    query_cache_ttl_seconds: int | None = Field(None, ge=0, le=86400)
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_retired_cache_ttl(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "query_cache_ttl_seconds" in value:
+            value = dict(value)
+            value.pop("query_cache_ttl_seconds", None)
+        return value
 
     @field_validator("branch")
     @classmethod

@@ -291,6 +291,8 @@ BINDINGS: Mapping[str, ProjectionBinding] = MappingProxyType(
             object_type="device",
             name="name",
             hostname="primary_ip4",
+            hostname_fallbacks=("primary_ip6",),
+            display_name="display",
             device_hostname="name",
             vendor="vendor",
             model="device_type",
@@ -306,6 +308,15 @@ BINDINGS: Mapping[str, ProjectionBinding] = MappingProxyType(
                 "enable.password_ref": "custom_fields.hegemony_enable_password_ref",
             },
             tags={"role": "role"},
+            native_tags="tags",
+            descriptive={
+                "asset_tag": "asset_tag",
+                "rack": "rack",
+                "position": "position",
+                "tenant": "tenant",
+                "location": "location",
+                "mgmt_host_v6": "primary_ip6",
+            },
             # NetBox states a primary address as 10.0.0.1/24, which is the truth about
             # the interface and useless to a transport. The stored object keeps it;
             # the device column gets the host. Declared here because which of the two a

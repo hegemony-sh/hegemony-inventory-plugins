@@ -39,7 +39,9 @@ TRANSFORMABLE_FIELDS = frozenset(
     {
         "name",
         "hostname",
+        "display_name",
         "device_hostname",
+        "mgmt_port",
         "vendor",
         "model",
         "platform",
@@ -79,7 +81,13 @@ class ProjectionBinding:
     name: str | None = None
     #: Device only: management address, DNS hostname, vendor, model, platform and serial.
     hostname: str | None = None
+    #: Additional management-address paths, tried in order after hostname.
+    hostname_fallbacks: tuple[str, ...] = ()
+    display_name: str | None = None
     device_hostname: str | None = None
+    #: Device only: source path and provider-wide fallback for the management port.
+    mgmt_port: str | None = None
+    default_mgmt_port: int | None = None
     vendor: str | None = None
     model: str | None = None
     platform: str | None = None
@@ -128,6 +136,9 @@ class ProjectionBinding:
     #: its ``name`` where it has no slug, because that is how every source that models a
     #: tag as a record spells the stable half of it.
     tag_list: str | None = None
+    #: Attribute path copied into DeviceDescriptor.native_tags. When omitted,
+    #: tag_list is reused so source tags retain both native and filter forms.
+    native_tags: str | None = None
     #: Prefix for the keys :attr:`tag_list` produces.
     #:
     #: Source tags and mapped fields share one namespace on the row, so a source tag
@@ -169,6 +180,17 @@ class ProjectionBinding:
             )
         if self.target == "device" and self.parent_edge:
             raise ValueError("ProjectionBinding: a device has no parent edge; use site_edge")
+        if self.target == "site" and (
+            self.hostname_fallbacks
+            or self.display_name
+            or self.mgmt_port
+            or self.default_mgmt_port is not None
+            or self.native_tags
+        ):
+            raise ValueError("ProjectionBinding: device-only fields are set on a site binding")
+        if self.default_mgmt_port is not None and not 1 <= self.default_mgmt_port <= 65535:
+            raise ValueError("ProjectionBinding: default_mgmt_port must be between 1 and 65535")
+        object.__setattr__(self, "hostname_fallbacks", tuple(self.hostname_fallbacks))
         if self.tag_prefix and not self.tag_list:
             # A prefix with nothing to prefix is a mapping that does not do what its
             # author thinks it does, which is worth failing rather than ignoring.

@@ -242,6 +242,38 @@ async def test_netbox_rejects_off_origin_pagination_before_sending_token(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"results": [None], "next": None},
+        {"results": [], "next": 42},
+    ],
+)
+async def test_netbox_rejects_malformed_pagination_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, Any],
+) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+    with pytest.raises(InventoryProviderError) as exc_info:
+        await provider.list_objects(
+            "interface",
+            limit=10,
+            context=ProviderCallContext(
+                provider_id="netbox:primary",
+                operation="read_objects",
+            ),
+        )
+
+    assert exc_info.value.envelope.code == ProviderErrorCode.PAGINATION_FAILED
+    assert exc_info.value.envelope.safe_details["page"] == 1
+
+
+@pytest.mark.asyncio
 async def test_sync_listing_is_not_truncated_by_the_run_target_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -317,7 +349,6 @@ def test_netbox_config_normalizes_field_map_entries() -> None:
     )
 
     assert config.field_map == {
-        "platform": "platform.slug",
         "access_config.ssh.username_ref": "custom_fields.hegemony_ssh_username_ref",
     }
 
@@ -604,7 +635,7 @@ async def test_netbox_list_objects_pushes_the_query_to_netbox(
         context=ProviderCallContext(provider_id="netbox:primary", operation="list_objects"),
     )
 
-    assert seen == ["https://netbox.example/api/ipam/vlans/?site=prg1&status=active"]
+    assert seen == ["https://netbox.example/api/ipam/vlans/?site=prg1&status=active&limit=100"]
 
 
 def test_netbox_provider_url_rejects_an_off_origin_link() -> None:
@@ -653,8 +684,8 @@ async def test_netbox_device_query_narrows_every_device_read(
     await provider.list_objects("device", {"site": "prg1"}, context=context)
 
     assert seen == [
-        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge",
-        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge&site=prg1",
+        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge&limit=100",
+        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge&site=prg1&limit=100",
     ]
 
 
@@ -1147,7 +1178,7 @@ async def test_netbox_reads_a_family_only_the_instance_knows_about(
         ),
     )
 
-    assert paths == ["/api/plugins/netbox-dns/records/"]
+    assert paths == ["/api/plugins/netbox-dns/records/?limit=100"]
     (record,) = objects
     assert (record.object_type, record.external_id, record.name) == (
         "netbox_dns.records",

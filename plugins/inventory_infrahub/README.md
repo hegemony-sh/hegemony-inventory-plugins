@@ -36,7 +36,6 @@ Create an `infrahub` inventory provider (Settings → Inventory Providers, or
 | `device_kind` | no | `InfraDevice` | GraphQL kind queried for devices |
 | `field_map` | no | built-in | Maps descriptor fields → GraphQL value paths. The built-in defaults target the standard Infrahub schema; if your deployment adds custom access-config refs or a non-standard management-port field, map those explicitly here. |
 | `default_access_config` | no | `{}` | Access-config defaults applied to every device |
-| `query_cache_ttl_seconds` | no | `null` | Optional query cache TTL (0–86400 s) |
 | `timeout_seconds` | no | `10` | Per-request timeout |
 
 Minimal config:
