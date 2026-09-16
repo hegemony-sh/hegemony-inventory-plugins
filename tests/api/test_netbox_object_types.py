@@ -264,7 +264,7 @@ async def test_a_family_the_catalogue_does_not_know_is_not_served(
     assert "not supported" in excinfo.value.envelope.message
     with pytest.raises(InventoryProviderError):
         await provider.get_object("unicorn", "1", context=_context("get_object:unicorn"))
-    assert requested == [], "an uncatalogued family must not reach NetBox at all"
+    assert requested == [], "an uncataloged family must not reach NetBox at all"
 
 
 _INTERFACE_PAYLOAD = {

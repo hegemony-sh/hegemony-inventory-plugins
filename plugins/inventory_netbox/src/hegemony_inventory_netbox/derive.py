@@ -124,8 +124,8 @@ def _titleize(segment: str) -> str:
     return " ".join(word.capitalize() for word in segment.replace("_", "-").split("-"))
 
 
-#: Endings that are already singular, so a trailing "s" must not be stripped from them:
-#: "chassis" is not the plural of "chassi", nor "status" of "statu".
+#: Endings that are already singular, so a trailing "s" must not be stripped from
+#: words such as "chassis" and "status".
 _INVARIANT_ENDINGS: tuple[str, ...] = ("ss", "is", "us")
 
 
