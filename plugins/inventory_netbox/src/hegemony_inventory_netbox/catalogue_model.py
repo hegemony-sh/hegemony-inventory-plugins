@@ -23,7 +23,7 @@ mapped and the absent one is simply null.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from hegemony_inventory_sdk import (
@@ -155,6 +155,8 @@ class NetBoxObjectType:
     search_fields: tuple[str, ...] = ("name",)
     icon: str | None = None
     relationships: tuple[RelationshipMapping, ...] = ()
+    #: JSON Schema for filters accepted by this family's collection endpoint.
+    query_schema: Mapping[str, Any] = field(default_factory=dict)
     #: Extra NetBox filter always applied to this family, on top of any configured one.
     base_query: str = ""
     #: How this family becomes a platform device or site, when it is one. ``None`` for
@@ -195,6 +197,7 @@ class NetBoxObjectType:
                 "type": "object",
                 "properties": {name: attr.schema for name, attr in self.attributes.items()},
             },
+            query_schema=self.query_schema,
             identity_keys=self.identity_keys,
             relationships=tuple(
                 ObjectTypeRelationshipSpec(

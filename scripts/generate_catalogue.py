@@ -200,6 +200,8 @@ def _family(entry: NetBoxObjectType) -> str:
         lines.append(f"        icon={_literal(entry.icon)},")
     if entry.base_query:
         lines.append(f"        base_query={_literal(entry.base_query)},")
+    if entry.query_schema:
+        lines.append(f"        query_schema={_literal(dict(entry.query_schema))},")
     if entry.binding is not None:
         lines.append(f"        binding={_binding(entry.binding)},")
     lines.append("        attributes={")

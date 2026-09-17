@@ -690,6 +690,122 @@ async def test_netbox_device_query_narrows_every_device_read(
 
 
 @pytest.mark.asyncio
+async def test_active_saved_scope_maps_a_tenant_and_compiles_typed_family_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One scope applies consistently without widening families that have no tenant."""
+    provider = _provider(
+        {
+            "inventory_scopes": [
+                {
+                    "name": "Tenant A",
+                    "tenant_slug": "tenant-a",
+                    "queries": {
+                        "device": [{"field": "status", "lookup": "not", "value": "offline"}],
+                        "interface": [{"field": "device_id", "lookup": "exact", "value": "7"}],
+                    },
+                    "tenant_scope_exemptions": ["interface"],
+                }
+            ],
+            "active_inventory_scope": "Tenant A",
+        },
+        token="netbox-token",
+    )
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _json_transport(
+            {
+                "/api/dcim/devices/": {"results": [], "next": None},
+                "/api/dcim/sites/": {"results": [], "next": None},
+                "/api/dcim/interfaces/": {"results": [], "next": None},
+                "/api/tenancy/tenants/": {"results": [], "next": None},
+            },
+            seen,
+        ),
+    )
+    context = ProviderCallContext(provider_id="netbox:primary", operation="read_objects")
+
+    await provider.list_objects("device", context=context)
+    await provider.list_objects("site", context=context)
+    await provider.list_objects("interface", context=context)
+    await provider.list_objects("tenant", context=context)
+
+    assert seen == [
+        "https://netbox.example/api/dcim/devices/?tenant=tenant-a&status__n=offline&limit=100",
+        "https://netbox.example/api/dcim/sites/?tenant=tenant-a&limit=100",
+        # Interfaces carry no tenant themselves. The provider never guesses a relational
+        # filter; this family is read only because the scope explicitly exempts it.
+        "https://netbox.example/api/dcim/interfaces/?device_id=7&limit=100",
+        "https://netbox.example/api/tenancy/tenants/?slug=tenant-a&limit=100",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tenant_scope_suppresses_a_family_without_a_proven_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A generic narrowing rule is not proof that every returned row belongs to a tenant."""
+    provider = _provider(
+        {
+            "inventory_scopes": [
+                {
+                    "name": "Tenant A",
+                    "tenant_slug": "tenant-a",
+                    "queries": {
+                        "interface": [{"field": "name", "lookup": "contains", "value": "uplink"}]
+                    },
+                }
+            ],
+            "active_inventory_scope": "Tenant A",
+        },
+        token="netbox-token",
+    )
+
+    def must_not_connect(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an unscoped tenant family must not reach NetBox")
+
+    _install_transport(monkeypatch, httpx.MockTransport(must_not_connect))
+    context = ProviderCallContext(provider_id="netbox:primary", operation="read_objects")
+
+    assert await provider.list_objects("interface", context=context) == []
+    pages = [page async for page in provider.iter_object_pages("interface", context=context)]
+    assert pages == [[]]
+    with pytest.raises(InventoryProviderError, match="suppressed"):
+        await provider.get_object("interface", "7", context=context)
+
+
+@pytest.mark.asyncio
+async def test_saved_scope_is_anded_with_legacy_and_caller_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _provider(
+        {
+            "device_query": "status=active",
+            "object_queries": {"device": "role=router"},
+            "inventory_scopes": [{"name": "A", "tenant_slug": "tenant-a"}],
+            "active_inventory_scope": "A",
+        },
+        token="netbox-token",
+    )
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _json_transport({"/api/dcim/devices/": {"results": [], "next": None}}, seen),
+    )
+
+    await provider.list_objects(
+        "device",
+        {"site": "ams01"},
+        context=ProviderCallContext(provider_id="netbox:primary", operation="read_objects"),
+    )
+
+    assert seen == [
+        "https://netbox.example/api/dcim/devices/?status=active&role=router&tenant=tenant-a&site=ams01&limit=100"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_netbox_ipam_objects_carry_a_provider_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1191,6 +1307,48 @@ async def test_netbox_reads_a_family_only_the_instance_knows_about(
         "type": "A",
         "value": "10.0.0.8",
     }
+
+
+@pytest.mark.asyncio
+async def test_discovered_only_family_uses_its_instances_query_schema_for_tenant_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(str(request.url))
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    provider = _provider(
+        {
+            "inventory_scopes": [{"name": "Tenant A", "tenant_slug": "tenant-a"}],
+            "active_inventory_scope": "Tenant A",
+        },
+        token="netbox-token",
+    )
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    mapping = ObjectFieldMapping(
+        object_type="custom.widgets",
+        identity="id",
+        name_field="name",
+        field_map={"name": "name", "tenant": "tenant.slug"},
+        source={"endpoint": "/api/plugins/custom/widgets/"},
+    )
+
+    await provider.list_objects(
+        "custom.widgets",
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="auto_sync_objects:custom.widgets",
+            object_mapping=mapping,
+            object_query_schema={
+                "type": "object",
+                "properties": {"tenant": {"type": "string"}},
+            },
+        ),
+    )
+
+    assert paths == ["https://netbox.example/api/plugins/custom/widgets/?tenant=tenant-a&limit=100"]
 
 
 @pytest.mark.asyncio

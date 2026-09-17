@@ -89,6 +89,12 @@ _COUNT_PREFIX = "count_"
 
 _SCALAR_TYPES: frozenset[str] = frozenset({"string", "integer", "number", "boolean"})
 
+# Controls how NetBox renders or pages a response rather than which objects belong in
+# it. Offering these in a scope builder would let a saved "filter" truncate a sync.
+_QUERY_CONTROL_PARAMETERS: frozenset[str] = frozenset(
+    {"brief", "depth", "exclude", "fields", "format", "limit", "offset", "ordering"}
+)
+
 #: How NetBox names the two properties that encode a generic reference beside the
 #: rendered object itself: ``scope_type``/``scope_id``, ``parent_object_type``/
 #: ``parent_object_id``. Both spellings are in use, so both are recognised.
@@ -449,6 +455,7 @@ def derive_catalogue(
                 external_id_keys,
                 custom_fields,
                 warnings,
+                _query_schema(schema, family.endpoint),
             )
         )
     warnings.extend(_stale_overlay_warnings(overlay, {family.endpoint for family in families}))
@@ -470,6 +477,7 @@ def _derive_family(
     external_id_keys: Mapping[str, str],
     custom_fields: Sequence[Mapping[str, Any]],
     warnings: list[str],
+    query_schema: Mapping[str, Any],
 ) -> NetBoxObjectType:
     attributes: dict[str, Attr] = {}
     relationships: list[RelationshipMapping] = []
@@ -539,6 +547,29 @@ def _derive_family(
     # while every edge into it cites its slug is two keys for one thing, which is exactly
     # the shape of the defect that started this work.
     external_id_key = external_id_keys.get(family.id, DEFAULT_EXTERNAL_ID_KEY)
+    query_properties = dict(query_schema.get("properties") or {})
+    # NetBox's common TenantFilterSet exposes the tenant slug under 'tenant' on
+    # tenant-aware models. Keep that one high-value filter available even in reduced
+    # schemas (including the recorded fixture) that omit django-filter parameters.
+    if "tenant" in attributes:
+        query_properties.setdefault(
+            "tenant",
+            {
+                "type": "string",
+                "description": "NetBox tenant slug.",
+            },
+        )
+    if family.endpoint == "/api/tenancy/tenants/":
+        query_properties.setdefault(
+            "slug",
+            {
+                "type": "string",
+                "description": "NetBox tenant slug.",
+            },
+        )
+    effective_query_schema: Mapping[str, Any] = (
+        {"type": "object", "properties": query_properties} if query_properties else {}
+    )
     return NetBoxObjectType(
         id=family.id,
         app=family.app,
@@ -557,7 +588,53 @@ def _derive_family(
         or _default_search_fields(attributes, natural, replaced),
         icon=presentation.icon if presentation else None,
         relationships=tuple(relationships),
+        query_schema=effective_query_schema,
     )
+
+
+def _query_schema(schema: Mapping[str, Any], endpoint: str) -> dict[str, Any]:
+    """JSON Schema for one endpoint's OpenAPI query parameters."""
+    paths = schema.get("paths")
+    operations = paths.get(endpoint) if isinstance(paths, Mapping) else None
+    if not isinstance(operations, Mapping):
+        return {}
+    get = operations.get("get")
+    if not isinstance(get, Mapping):
+        return {}
+    parameters: list[Any] = []
+    for declared in (operations.get("parameters"), get.get("parameters")):
+        if isinstance(declared, Sequence) and not isinstance(declared, str):
+            parameters.extend(declared)
+    components = schema.get("components")
+    component_parameters = (
+        components.get("parameters")
+        if isinstance(components, Mapping) and isinstance(components.get("parameters"), Mapping)
+        else {}
+    )
+    properties: dict[str, Any] = {}
+    for raw in parameters:
+        if not isinstance(raw, Mapping):
+            continue
+        parameter = raw
+        ref = raw.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/components/parameters/"):
+            resolved = component_parameters.get(ref.rsplit("/", 1)[-1])
+            if isinstance(resolved, Mapping):
+                parameter = resolved
+        if parameter.get("in") != "query":
+            continue
+        name = parameter.get("name")
+        declared_schema = parameter.get("schema")
+        if not isinstance(name, str) or not name or not isinstance(declared_schema, Mapping):
+            continue
+        if name in _QUERY_CONTROL_PARAMETERS:
+            continue
+        field_schema = dict(declared_schema)
+        description = parameter.get("description")
+        if isinstance(description, str) and description:
+            field_schema.setdefault("description", description)
+        properties[name] = field_schema
+    return {"type": "object", "properties": properties} if properties else {}
 
 
 def _derive_property(

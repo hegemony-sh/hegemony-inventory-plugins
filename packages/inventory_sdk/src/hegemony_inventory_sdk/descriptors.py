@@ -11,6 +11,7 @@ remain first-class and are bridged onto the generic store by the platform.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -68,6 +69,13 @@ class ProviderCallContext:
     #: Returning one record twice costs an upsert that changes nothing; missing one
     #: leaves the platform wrong until the next full pass.
     since: str | None = None
+    #: Filters the instance advertised for this object family, as JSON Schema.
+    #:
+    #: Kept with the per-family call metadata for the same reason as ``object_mapping``:
+    #: a family discovered from one instance may not exist in the provider's shipped
+    #: catalogue, and a fresh provider has nowhere else to recover its query contract.
+    #: Appended to preserve positional construction of the older context fields.
+    object_query_schema: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

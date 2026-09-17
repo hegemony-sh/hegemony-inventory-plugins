@@ -53,6 +53,123 @@ DEFAULT_FIELD_MAP = {
 }
 
 
+class NetBoxScopeClause(BaseModel):
+    """One typed NetBox filter in a saved inventory scope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_.-]*(?:__[A-Za-z0-9_]+)?$",
+        description="NetBox filter field, as advertised by this family's query schema.",
+    )
+    lookup: Literal[
+        "exact",
+        "not",
+        "contains",
+        "not_contains",
+        "starts_with",
+        "ends_with",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "empty",
+    ] = "exact"
+    value: str = Field(..., min_length=1, max_length=2048)
+
+    @field_validator("field", "value")
+    @classmethod
+    def strip_scope_clause_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("scope clause field and value are required")
+        return stripped
+
+
+class NetBoxInventoryScope(BaseModel):
+    """A named, reusable set of filters stored with one provider configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=100)
+    tenant_slug: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[a-z0-9][a-z0-9_-]*$",
+        description=(
+            "Optional NetBox tenant slug. It automatically scopes the tenant family by "
+            "slug and every family whose discovered schema exposes a tenant filter."
+        ),
+    )
+    queries: dict[str, list[NetBoxScopeClause]] = Field(
+        default_factory=dict,
+        description="Additional typed filters keyed by inventory object type.",
+    )
+    tenant_scope_exemptions: list[str] = Field(
+        default_factory=list,
+        max_length=128,
+        description=(
+            "Families intentionally allowed when they do not advertise a tenant filter. "
+            "Use only for shared reference data or when the NetBox token enforces the boundary."
+        ),
+    )
+
+    @field_validator("name")
+    @classmethod
+    def strip_scope_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("scope name is required")
+        return stripped
+
+    @field_validator("queries")
+    @classmethod
+    def validate_scope_queries(
+        cls, value: dict[str, list[NetBoxScopeClause]]
+    ) -> dict[str, list[NetBoxScopeClause]]:
+        normalized: dict[str, list[NetBoxScopeClause]] = {}
+        invalid: list[str] = []
+        for object_type, clauses in value.items():
+            key = str(object_type).strip()
+            try:
+                validate_object_type_id(key)
+            except ValueError:
+                invalid.append(key)
+                continue
+            if clauses:
+                normalized[key] = clauses
+        if invalid:
+            raise ValueError(
+                f"scope queries have invalid object type id(s): {', '.join(sorted(invalid))}"
+            )
+        return normalized
+
+    @field_validator("tenant_scope_exemptions")
+    @classmethod
+    def validate_tenant_scope_exemptions(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        invalid: list[str] = []
+        for object_type in value:
+            key = object_type.strip()
+            try:
+                validate_object_type_id(key)
+            except ValueError:
+                invalid.append(key)
+                continue
+            if key not in normalized:
+                normalized.append(key)
+        if invalid:
+            raise ValueError(
+                "tenant scope exemptions have invalid object type id(s): "
+                f"{', '.join(sorted(invalid))}"
+            )
+        return normalized
+
+
 class NetBoxProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -147,6 +264,20 @@ class NetBoxProviderConfig(BaseModel):
             "'ip_prefix': 'status=active'}. Keys are object type ids; a caller-supplied "
             "query is appended to the configured one."
         ),
+    )
+    inventory_scopes: list[NetBoxInventoryScope] = Field(
+        default_factory=list,
+        max_length=32,
+        description=(
+            "Named schema-aware filter sets. They are stored with the provider so they "
+            "travel through Configuration Exchange; active_inventory_scope selects the "
+            "one ANDead with legacy device_query/object_queries."
+        ),
+    )
+    active_inventory_scope: str | None = Field(
+        default=None,
+        max_length=100,
+        description="Name of the saved inventory scope applied to every provider read.",
     )
     page_size: int = Field(
         100,
@@ -259,6 +390,28 @@ class NetBoxProviderConfig(BaseModel):
                 f"object_queries has invalid object type id(s): {', '.join(sorted(unknown))}"
             )
         return normalized
+
+    @model_validator(mode="after")
+    def validate_inventory_scopes(self) -> NetBoxProviderConfig:
+        names = [scope.name for scope in self.inventory_scopes]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"inventory scope names must be unique: {', '.join(duplicates)}")
+        if self.active_inventory_scope is not None:
+            active = self.active_inventory_scope.strip()
+            if active not in names:
+                raise ValueError("active_inventory_scope must name one of inventory_scopes")
+            self.active_inventory_scope = active
+        return self
+
+    def active_scope(self) -> NetBoxInventoryScope | None:
+        """The selected saved scope, or None when raw filters are the whole scope."""
+        if self.active_inventory_scope is None:
+            return None
+        return next(
+            (scope for scope in self.inventory_scopes if scope.name == self.active_inventory_scope),
+            None,
+        )
 
     @field_validator("status_map")
     @classmethod

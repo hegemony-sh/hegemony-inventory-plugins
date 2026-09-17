@@ -706,3 +706,57 @@ def test_the_config_rejects_families_nothing_serves_and_forgets_the_retired_sett
     # An unknown key that was never ours is still an error.
     with pytest.raises(ValidationError):
         NetBoxProviderConfig.model_validate({**base, "nonsense": 1})
+
+
+def test_saved_scope_names_are_unique_and_the_active_name_must_exist() -> None:
+    base = {"url": "https://netbox.example", "token_ref": "vault://netbox/token"}
+    scope = {
+        "name": "Tenant A",
+        "tenant_slug": "tenant-a",
+        "queries": {"device": [{"field": "status", "lookup": "exact", "value": "active"}]},
+        "tenant_scope_exemptions": ["interface", "interface"],
+    }
+
+    config = NetBoxProviderConfig.model_validate(
+        {
+            **base,
+            "inventory_scopes": [scope],
+            "active_inventory_scope": "Tenant A",
+        }
+    )
+    active = config.active_scope()
+    assert active is not None
+    assert active.tenant_slug == "tenant-a"
+    assert active.tenant_scope_exemptions == ["interface"]
+
+    with pytest.raises(ValidationError, match="must be unique"):
+        NetBoxProviderConfig.model_validate(
+            {
+                **base,
+                "inventory_scopes": [scope, scope],
+                "active_inventory_scope": "Tenant A",
+            }
+        )
+    with pytest.raises(ValidationError, match="must name one"):
+        NetBoxProviderConfig.model_validate(
+            {
+                **base,
+                "inventory_scopes": [scope],
+                "active_inventory_scope": "Tenant B",
+            }
+        )
+    with pytest.raises(ValidationError, match="required"):
+        NetBoxProviderConfig.model_validate(
+            {
+                **base,
+                "inventory_scopes": [
+                    {
+                        "name": "Bad",
+                        "queries": {
+                            "device": [{"field": "status", "lookup": "exact", "value": " "}]
+                        },
+                    }
+                ],
+                "active_inventory_scope": "Bad",
+            }
+        )

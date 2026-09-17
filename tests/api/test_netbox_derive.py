@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+from copy import deepcopy
 from typing import Any
 
 import pytest
@@ -44,6 +45,45 @@ _BY_ENDPOINT = {entry.endpoint: entry for entry in _DERIVED.object_types}
 def test_the_fixture_is_a_real_netbox_release() -> None:
     assert _DERIVED.source_version is not None
     assert _DERIVED.source_version.startswith("4.3")
+
+
+def test_query_parameters_become_a_separate_query_schema() -> None:
+    """A response field is not proof that NetBox accepts it as a filter.
+
+    Discovery therefore carries the GET operation's query parameters separately,
+    including reusable OpenAPI parameter components and their enum/type metadata.
+    """
+    schema = deepcopy(_SCHEMA)
+    schema.setdefault("components", {}).setdefault("parameters", {})["Search"] = {
+        "name": "q",
+        "in": "query",
+        "description": "Free text search.",
+        "schema": {"type": "string"},
+    }
+    schema["paths"]["/api/dcim/devices/"]["get"]["parameters"] = [
+        {"$ref": "#/components/parameters/Search"},
+        {
+            "name": "status",
+            "in": "query",
+            "schema": {"type": "string", "enum": ["active", "offline"]},
+        },
+        {"name": "limit", "in": "query", "schema": {"type": "integer"}},
+        {"name": "ignored", "in": "header", "schema": {"type": "string"}},
+    ]
+
+    devices = next(
+        entry
+        for entry in derive_catalogue(schema).object_types
+        if entry.endpoint == "/api/dcim/devices/"
+    )
+
+    assert devices.query_schema["properties"] == {
+        "q": {"type": "string", "description": "Free text search."},
+        "status": {"type": "string", "enum": ["active", "offline"]},
+        # The fixture deliberately strips django-filter parameters; the tenant-aware
+        # fallback remains present for the cross-organization mapping workflow.
+        "tenant": {"type": "string", "description": "NetBox tenant slug."},
+    }
 
 
 # ── The conformance gate ──────────────────────────────────────────────────────

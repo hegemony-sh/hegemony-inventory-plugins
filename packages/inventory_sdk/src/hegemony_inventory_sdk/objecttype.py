@@ -68,6 +68,15 @@ class ObjectTypeSpec:
     identity_keys: tuple[str, ...] = ()
     relationships: tuple[ObjectTypeRelationshipSpec, ...] = ()
     ui: ObjectTypeUIHints = field(default_factory=ObjectTypeUIHints)
+    #: JSON Schema for the filters accepted when this family is queried.
+    #:
+    #: This is deliberately separate from ``field_schema``. A response property is
+    #: not necessarily filterable, and a source can expose lookup expressions such as
+    #: ``last_updated__gte`` that are not response properties at all. Keeping the two
+    #: contracts apart lets a platform build a query editor without teaching it a
+    #: provider's private query language or offering fields the source will reject.
+    #: Appended to preserve positional construction of the older spec fields.
+    query_schema: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_object_type_id(self.id)
@@ -87,6 +96,7 @@ class ObjectTypeSpec:
         plural: str | None = None,
         description: str | None = None,
         group: str | None = None,
+        query_schema: Mapping[str, Any] | None = None,
         identity_keys: Sequence[str] = (),
         relationships: Sequence[ObjectTypeRelationshipSpec] = (),
         ui: ObjectTypeUIHints | None = None,
@@ -99,6 +109,7 @@ class ObjectTypeSpec:
             description=description,
             group=group,
             field_schema=model.model_json_schema(),
+            query_schema=query_schema or {},
             identity_keys=tuple(identity_keys),
             relationships=tuple(relationships),
             ui=ui or ObjectTypeUIHints(),

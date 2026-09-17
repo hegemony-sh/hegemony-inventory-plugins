@@ -11,7 +11,7 @@ import builtins
 import json
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from time import monotonic
 from typing import Any, cast
 from urllib.parse import ParseResult, quote, urlencode, urljoin, urlparse
@@ -53,6 +53,20 @@ from .derive import (
 from .object_types import ALL_OBJECT_TYPE_IDS, NetBoxObjectType, sources_for
 
 KNOWN_AUTH_SCHEMES = frozenset({"bearer", "token", "basic"})
+
+_SCOPE_LOOKUP_SUFFIX = {
+    "exact": "",
+    "not": "__n",
+    "contains": "__ic",
+    "not_contains": "__nic",
+    "starts_with": "__isw",
+    "ends_with": "__iew",
+    "gt": "__gt",
+    "gte": "__gte",
+    "lt": "__lt",
+    "lte": "__lte",
+    "empty": "__empty",
+}
 
 
 def _query_to_expr(query: Mapping[str, Any] | None) -> str:
@@ -119,6 +133,7 @@ class _FetchPlan:
     endpoint: str
     mapping: ObjectFieldMapping
     base_query: str = ""
+    query_schema: Mapping[str, Any] = field(default_factory=dict)
 
 
 class NetBoxInventoryProvider(InventoryProvider):
@@ -255,6 +270,7 @@ class NetBoxInventoryProvider(InventoryProvider):
         ``None`` for anything neither knows: a family nobody has ever described.
         """
         mapping = context.object_mapping
+        discovered_query_schema = context.object_query_schema
         if mapping is not None and mapping.object_type != object_type:
             # A mapping for some other family says nothing about this one.
             mapping = None
@@ -265,6 +281,13 @@ class NetBoxInventoryProvider(InventoryProvider):
                 source.endpoint,
                 _with_discovered_paths(source.mapping, mapping),
                 source.base_query,
+                {
+                    "type": "object",
+                    "properties": {
+                        **dict(source.query_schema.get("properties") or {}),
+                        **dict(discovered_query_schema.get("properties") or {}),
+                    },
+                },
             )
         if mapping is None:
             return None
@@ -273,7 +296,13 @@ class NetBoxInventoryProvider(InventoryProvider):
             # A mapping with nowhere to read from cannot be acted on. Falling through to
             # the SDK default reports "not supported", which is what it is.
             return None
-        return _FetchPlan(object_type, endpoint, mapping, mapping.source.get("base_query", ""))
+        return _FetchPlan(
+            object_type,
+            endpoint,
+            mapping,
+            mapping.source.get("base_query", ""),
+            discovered_query_schema,
+        )
 
     async def list_objects(
         self,
@@ -292,6 +321,8 @@ class NetBoxInventoryProvider(InventoryProvider):
             return await super().list_objects(
                 object_type, query, limit=limit, cursor=cursor, context=context
             )
+        if not self._tenant_scope_allows(plan):
+            return []
         items = await self._paginated(
             self._object_path(plan, self._with_since(_query_to_expr(query), context)),
             context,
@@ -317,6 +348,12 @@ class NetBoxInventoryProvider(InventoryProvider):
         plan = self._fetch_plan(object_type, context)
         if plan is None:
             yield await super().list_objects(object_type, query, context=context)
+            return
+        if not self._tenant_scope_allows(plan):
+            # A complete empty page lets the platform stale rows from an earlier,
+            # wider configuration instead of leaving them active after isolation is
+            # enabled. Config edits already force this first pass to be a full read.
+            yield []
             return
         path = self._object_path(plan, self._with_since(_query_to_expr(query), context))
         async for items in self._iter_paginated(
@@ -375,7 +412,51 @@ class NetBoxInventoryProvider(InventoryProvider):
         """
         configured = self.config.object_queries.get(plan.object_type, "")
         scoped = self.config.device_query if plan.object_type == "device" else ""
-        return "&".join(part for part in (plan.base_query, scoped, configured) if part)
+        saved = self._saved_scope_query(plan)
+        return "&".join(part for part in (plan.base_query, scoped, configured, saved) if part)
+
+    def _saved_scope_query(self, plan: _FetchPlan) -> str:
+        """Compile the active named scope into NetBox's filter query language."""
+        scope = self.config.active_scope()
+        if scope is None:
+            return ""
+
+        pairs: list[tuple[str, str]] = []
+        tenant_filter = self._tenant_scope_filter(plan)
+        if tenant_filter is not None:
+            pairs.append(tenant_filter)
+
+        for clause in scope.queries.get(plan.object_type, ()):
+            suffix = _SCOPE_LOOKUP_SUFFIX[clause.lookup]
+            pairs.append((f"{clause.field}{suffix}", clause.value))
+        return urlencode(pairs)
+
+    def _tenant_scope_filter(self, plan: _FetchPlan) -> tuple[str, str] | None:
+        """The tenant filter this instance proved the family accepts, if any."""
+        scope = self.config.active_scope()
+        if scope is None or not scope.tenant_slug:
+            return None
+        query_fields = set((plan.query_schema or {}).get("properties") or {})
+        if plan.object_type == "tenant" and "slug" in query_fields:
+            return ("slug", scope.tenant_slug)
+        if "tenant" in plan.mapping.field_map and "tenant" in query_fields:
+            return ("tenant", scope.tenant_slug)
+        return None
+
+    def _tenant_scope_allows(self, plan: _FetchPlan) -> bool:
+        """Fail closed when a tenant scope cannot constrain this family.
+
+        Additional rules may narrow a family but do not prove tenant ownership. An
+        exemption is therefore explicit: it is for shared reference data or a NetBox
+        account whose object permissions enforce the boundary independently.
+        """
+        scope = self.config.active_scope()
+        if scope is None or not scope.tenant_slug:
+            return True
+        return (
+            self._tenant_scope_filter(plan) is not None
+            or plan.object_type in scope.tenant_scope_exemptions
+        )
 
     def _object_path(self, plan: _FetchPlan, expr: str) -> str:
         """The endpoint for one family, scoped by its configured and caller filters.
@@ -402,6 +483,13 @@ class NetBoxInventoryProvider(InventoryProvider):
         plan = self._fetch_plan(object_type, context)
         if plan is None:
             return await super().get_object(object_type, external_id, context=context)
+        if not self._tenant_scope_allows(plan):
+            raise self._error(
+                ProviderErrorCode.NOT_FOUND,
+                f"NetBox {object_type} is suppressed because the active tenant scope "
+                "cannot constrain that family",
+                context.operation,
+            )
         identifier = str(external_id).strip()
         if not identifier:
             raise self._error(

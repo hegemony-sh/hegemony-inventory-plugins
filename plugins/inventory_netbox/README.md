@@ -42,6 +42,8 @@ rendered automatically and `token_ref` gets a secret picker.
 | `field_map` | no | built-in | Maps credential-reference fields (`access_config.*`) to NetBox custom-field paths; historical non-credential defaults are accepted but ignored |
 | `default_access_config` | no | `{}` | Access-config defaults applied to every device |
 | `object_queries` | no | `{}` | Per-family NetBox filter, e.g. `{"interface": "mgmt_only=false"}` — `device_query` for everything that is not a device |
+| `inventory_scopes` | no | `[]` | Named schema-aware filter sets, built in the provider form and carried by Configuration Exchange |
+| `active_inventory_scope` | no | `null` | Name of the saved scope combined with `device_query` and `object_queries` |
 | `page_size` | no | `100` | Records requested per NetBox API page (1–1000) |
 | `timeout_seconds` | no | `10` | Per-request timeout |
 | `max_response_bytes` | no | `67108864` | Largest response body this provider will read. A timeout bounds how *long* a read may take; this bounds how *much* it may return, which is a different failure — a source answering steadily and forever never goes quiet. Generous by default because `/api/schema/` really is several megabytes. |
@@ -259,6 +261,61 @@ The filter bounds what the provider can see of that family, not just what it lis
 reading one object obeys it too: a scoped family resolves an id through the filtered list
 endpoint, and an object outside the scope reads as absent rather than being returned to a
 caller that happens to know its id.
+
+### Saved scopes and mapping NetBox tenants
+
+The provider form can store several named inventory scopes and select one as active.
+After **Discover**, the rule builder uses this NetBox instance's own OpenAPI query
+parameters: the family picker contains only selected families, the field picker contains
+only filters the endpoint advertised, and enum/type information travels with each field.
+The advanced raw filters above remain available and are combined with the active scope.
+
+The common case has a shortcut. Set **Map NetBox tenant slug** on a saved scope and the
+provider applies:
+
+- `slug=<tenant>` to the `tenant` family;
+- `tenant=<tenant>` to every selected family whose discovered mapping and query schema
+  expose a tenant; and
+- no guessed filter to a family such as `interface` that does not carry a tenant. Such
+  a family is suppressed unless the scope explicitly exempts it.
+
+For example, the stored configuration behind a Hegemony organization can contain:
+
+```json
+{
+  "inventory_scopes": [
+    {
+      "name": "Tenant A",
+      "tenant_slug": "tenant-a",
+      "queries": {
+        "device": [
+          { "field": "status", "lookup": "not", "value": "offline" }
+        ]
+      },
+      "tenant_scope_exemptions": ["region"]
+    }
+  ],
+  "active_inventory_scope": "Tenant A"
+}
+```
+
+Configure the same NetBox URL in another Hegemony organization with a different saved
+scope to partition one source across both organizations. Provider ids, rows, watermarks
+and sync history remain organization-scoped. The form lists every selected family that
+does not accept the tenant shortcut. It is suppressed by default, including when it has
+another narrowing rule: a `status` or `device_id` query does not prove tenant ownership.
+Check its exemption only when it is intentionally shared or the NetBox account's object
+permissions enforce the boundary. Regions and site groups are the common shared case;
+set `site_tree_source` to `none` when they must not cross the boundary.
+
+These queries are a synchronization boundary, not an authorization boundary. Use a
+different least-privilege NetBox token/account for each Hegemony organization when the
+separation is security-sensitive. An unrestricted shared token can read whatever a
+future configuration permits.
+
+Changing the active scope or any of its rules is a provider config change. Hegemony
+forgets that provider's delta watermarks and forces a full pass, so records that left
+the scope become stale instead of remaining silently active.
 
 ### The catalogue
 
