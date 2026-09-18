@@ -103,7 +103,9 @@ def test_discovered_tenant_field_does_not_invent_a_tenant_filter():
 
 def test_raw_token_is_not_accepted_and_exported_as_safe_config():
     with pytest.raises(ValidationError):
-        config = NetBoxProviderConfig(url="https://netbox.example", token_ref="raw-token-example")
+        config = NetBoxProviderConfig.model_validate(
+            {"url": "https://netbox.example", "token_ref": "raw-token-example"}
+        )
         assert config.safe_config()["token_ref"] == "raw-token-example"
 
 
@@ -155,7 +157,7 @@ def test_independent_scope_constraints_intersect(baseline, caller, expected):
 )
 def test_token_reference_rejects_literal_credentials(value):
     with pytest.raises(ValidationError):
-        NetBoxProviderConfig(url="https://netbox.example", token_ref=value)
+        NetBoxProviderConfig.model_validate({"url": "https://netbox.example", "token_ref": value})
 
 
 @pytest.mark.parametrize(
@@ -163,5 +165,7 @@ def test_token_reference_rejects_literal_credentials(value):
     ["{{ env('KEY') }}", "{{ file('token') }}", "{{ secret('vault://orgs/default/token/value') }}"],
 )
 def test_token_reference_preserves_supported_references(value):
-    config = NetBoxProviderConfig(url="https://netbox.example", token_ref=value)
+    config = NetBoxProviderConfig.model_validate(
+        {"url": "https://netbox.example", "token_ref": value}
+    )
     assert config.safe_config()["token_ref"] == value
