@@ -813,7 +813,7 @@ async def test_saved_scope_is_anded_with_legacy_and_caller_queries(
     )
 
     assert seen == [
-        "https://netbox.example/api/dcim/devices/?status=active&role=router&tenant=tenant-a&site=ams01&limit=100"
+        "https://netbox.example/api/dcim/devices/?tenant=tenant-a&role=router&status=active&site=ams01&limit=100"
     ]
 
 
@@ -1768,3 +1768,196 @@ async def test_a_record_without_a_timestamp_simply_carries_no_marker(
 def test_netbox_declares_it_can_answer_what_changed() -> None:
     """The capability is the promise core checks before asking for a delta at all."""
     assert Capability.DELTA in _provider().capabilities
+
+
+def test_legacy_filters_migrate_without_widening_and_round_trip() -> None:
+    config = _provider(
+        {
+            "device_query": "tag=managed&status=active&status=offline",
+            "object_queries": {"contact": "group=gondor", "device": "tag=edge&status=active"},
+            "inventory_scopes": [
+                {
+                    "name": "gondor",
+                    "tenant_slug": "gondor",
+                    "tenant_scope_exemptions": ["contact"],
+                    "queries": {"contact": [{"field": "group", "value": "gondor"}]},
+                },
+                {"name": "unused", "tenant_slug": "rohan"},
+            ],
+            "active_inventory_scope": "gondor",
+        }
+    ).config
+    rules = config.inventory_filter.queries
+    assert len(rules["contact"]) == 1
+    assert {r.field: r.value for r in rules["device"]} == {
+        "tag": ["edge", "managed"],
+        "status": "active",
+    }
+    assert config.inventory_filter.tenant_slug == "gondor"
+    assert config.inventory_filter.tenant_scope_exemptions == ["contact"]
+    assert NetBoxProviderConfig.model_validate(config.model_dump(mode="json")) == config
+    for key in ("device_query", "object_queries", "inventory_scopes", "active_inventory_scope"):
+        assert key not in config.model_dump()
+        assert key not in config.model_json_schema()["properties"]
+
+
+@pytest.mark.parametrize(
+    "legacy",
+    [
+        {"object_queries": {"contact": 42}},
+        {"device_query": ["tag=managed"]},
+        {"device_query": "tenant=rohan", "object_queries": {"device": "tenant=gondor"}},
+        {
+            "inventory_filter": {
+                "queries": {"contact": [{"field": "group", "lookup": "oops", "value": "gondor"}]}
+            },
+            "device_query": "tag=managed",
+        },
+    ],
+)
+def test_invalid_legacy_filters_fail_validation(legacy) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _provider(legacy)
+
+
+@pytest.mark.parametrize(
+    ("kind", "parent", "family"),
+    [
+        ("dcim.interface", "device", "interface"),
+        ("virtualization.vminterface", "virtual_machine", "vm_interface"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_ip_assignment_links_to_interface_and_parent(
+    monkeypatch, kind, parent, family
+) -> None:
+    record = {
+        "id": 9,
+        "address": "10.90.1.12/24",
+        "assigned_object_type": kind,
+        "assigned_object_id": 4,
+        "assigned_object": {
+            "id": 4,
+            "name": "GigabitEthernet1",
+            "display": "GigabitEthernet1",
+            parent: {"id": 7, "name": "mt1-edge-02"},
+        },
+        "_hegemony_interface": {"id": 999},
+        "_hegemony_vm_interface": {"id": 999},
+        "url": "https://netbox.example/api/ipam/ip-addresses/9/",
+    }
+    _install_transport(
+        monkeypatch, httpx.MockTransport(lambda request: httpx.Response(200, json=record))
+    )
+    obj = await _provider({"public_url": "https://inventory.example/netbox/"}).get_object(
+        "ip_address",
+        "9",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="get_object"),
+    )
+    assert obj.attributes[parent] == "mt1-edge-02"
+    edges = {
+        (edge.rel, edge.target_object_type, edge.target_external_id) for edge in obj.relationships
+    }
+    assert (family, family, "4") in edges
+    assert (parent, parent, "7") in edges
+    assert all(edge[2] != "999" for edge in edges)
+    assert (
+        obj.descriptive["provider_url"] == "https://inventory.example/netbox/ipam/ip-addresses/9/"
+    )
+
+
+def test_public_url_preserves_mounts_and_rejects_foreign_links() -> None:
+    provider = _provider(
+        {"url": "http://netbox:8080/internal/", "public_url": "https://inventory.example/netbox/"}
+    )
+    assert (
+        provider._provider_url({"url": "http://netbox:8080/internal/api/ipam/ip-addresses/9/"})
+        == "https://inventory.example/netbox/ipam/ip-addresses/9/"
+    )
+    assert (
+        provider._provider_url({"display_url": "https://untrusted.example/ipam/ip-addresses/9/"})
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_shared_discovery_authenticates_each_connection_and_keeps_custom_fields_private(
+    monkeypatch,
+) -> None:
+    class Cache:
+        def __init__(self):
+            self.schemas = {}
+
+        async def get(self, key):
+            return self.schemas.get(key)
+
+        async def put(self, key, schema):
+            self.schemas[key] = schema
+
+    cache = Cache()
+    schema = json.loads(
+        (pathlib.Path(__file__).parents[1] / "fixtures/netbox-4.3-schema.json").read_text()
+    )
+    seen = []
+
+    def handler(request):
+        auth = request.headers.get("Authorization")
+        seen.append((request.method, request.url.host, request.url.path, auth))
+        if auth == "Bearer denied":
+            return httpx.Response(403, json={"detail": "denied"})
+        if request.url.path == "/api/schema/":
+            return httpx.Response(200, json=schema if request.method == "GET" else {})
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"name": auth.split()[-1], "type": "text", "object_types": ["dcim.device"]}
+                ],
+                "next": None,
+            },
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    def connection(url, token):
+        provider = _provider(
+            {
+                "url": url,
+                "discovery_url": "https://canonical.example/",
+                "auth_fallback_schemes": [],
+            },
+            token=token,
+        )
+        services: Any = provider._services
+        services.schema_cache = cache
+        return provider
+
+    first, second = (
+        connection("https://first.example", "gondor"),
+        connection("https://second.example", "rohan"),
+    )
+    context = ProviderCallContext(provider_id="netbox:primary", operation="discover_cached")
+    a, b = await first.discover(context=context), await second.discover(context=context)
+    assert first.discovery_cache_key == second.discovery_cache_key
+    assert len([r for r in seen if r[0] == "GET" and r[2] == "/api/schema/"]) == 1
+    assert ("OPTIONS", "canonical.example", "/api/schema/", "Bearer rohan") in seen
+    assert ("GET", "second.example", "/api/extras/custom-fields/", "Bearer rohan") in seen
+    devices_a = next(spec for spec in a.object_types if spec.id == "device")
+    devices_b = next(spec for spec in b.object_types if spec.id == "device")
+    assert devices_a.field_schema != devices_b.field_schema
+    with pytest.raises(InventoryProviderError):
+        await connection("https://third.example", "denied").discover(context=context)
+    await second.discover(
+        context=ProviderCallContext(provider_id="netbox:primary", operation="discover")
+    )
+    assert len([r for r in seen if r[0] == "GET" and r[2] == "/api/schema/"]) == 2
+    assert (
+        _provider({"url": "https://NETBOX.example:443/"}).discovery_cache_key
+        == _provider().discovery_cache_key
+    )
+    assert (
+        _provider({"url": "https://another.example/"}).discovery_cache_key
+        != _provider().discovery_cache_key
+    )

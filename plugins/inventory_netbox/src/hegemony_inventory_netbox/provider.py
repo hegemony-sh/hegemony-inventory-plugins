@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import hashlib
 import json
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from time import monotonic
 from typing import Any, cast
-from urllib.parse import ParseResult, parse_qsl, quote, urlencode, urljoin, urlparse
+from urllib.parse import ParseResult, quote, urlencode, urljoin, urlparse
 
 import httpx
 
@@ -50,48 +51,10 @@ from .derive import (
     read_status,
     registered_catalogue,
 )
+from .filters import LOOKUP_SUFFIX as _SCOPE_LOOKUP_SUFFIX, intersect_queries as _intersect_queries
 from .object_types import ALL_OBJECT_TYPE_IDS, NetBoxObjectType, sources_for
 
 KNOWN_AUTH_SCHEMES = frozenset({"bearer", "token", "basic"})
-
-_SCOPE_LOOKUP_SUFFIX = {
-    "exact": "",
-    "not": "__n",
-    "contains": "__ic",
-    "not_contains": "__nic",
-    "starts_with": "__isw",
-    "ends_with": "__iew",
-    "gt": "__gt",
-    "gte": "__gte",
-    "lt": "__lt",
-    "lte": "__lte",
-    "empty": "__empty",
-}
-
-
-def _intersect_queries(*queries: str) -> str:
-    """Combine restrictions without turning repeated OR filters into a union.
-
-    Repeated values within one raw query retain NetBox's native meaning. Between
-    independently configured restrictions they must intersect. Tags are NetBox's
-    explicit AND filters and can safely accumulate values.
-    """
-    combined: dict[str, list[str]] = {}
-    for query in queries:
-        current: dict[str, list[str]] = {}
-        for key, value in parse_qsl(query.lstrip("?"), keep_blank_values=True):
-            current.setdefault(key, []).append(value)
-        for key, values in current.items():
-            if key not in combined:
-                combined[key] = values
-            elif key in {"tag", "tag_id"}:
-                combined[key] = list(dict.fromkeys([*combined[key], *values]))
-            else:
-                common = [value for value in combined[key] if value in values]
-                if not common:
-                    raise ValueError(f"Conflicting NetBox scope constraints for {key}")
-                combined[key] = list(dict.fromkeys(common))
-    return urlencode([(key, value) for key, values in combined.items() for value in values])
 
 
 def _query_to_expr(query: Mapping[str, Any] | None) -> str:
@@ -183,6 +146,14 @@ class NetBoxInventoryProvider(InventoryProvider):
         self.config = NetBoxProviderConfig.model_validate(config or {})
         self._services = services
         self._object_sources: dict[str, NetBoxObjectType] = sources_for(ALL_OBJECT_TYPE_IDS)
+
+    @property
+    def discovery_cache_key(self) -> str:
+        url = urlparse(str(self.config.discovery_url or self.config.url))
+        scheme, host, port = self._origin(url)
+        identity = f"{scheme}://{host.lower()}:{port}{url.path.rstrip('/')}"
+        # Version the derivation contract as well as the instance identity.
+        return hashlib.sha256(f"netbox-schema-v2:{identity}".encode()).hexdigest()
 
     def configured_projection_bindings(
         self, object_types: Iterable[str]
@@ -361,7 +332,13 @@ class NetBoxInventoryProvider(InventoryProvider):
         return [
             self._with_marker(self._with_provider_url(descriptor, item), item)
             for descriptor, item in zip(
-                map_records(items, plan.mapping, provider_id=self.id), items, strict=True
+                map_records(
+                    (self._assignment_record(item, plan.object_type) for item in items),
+                    plan.mapping,
+                    provider_id=self.id,
+                ),
+                items,
+                strict=True,
             )
         ]
 
@@ -392,7 +369,13 @@ class NetBoxInventoryProvider(InventoryProvider):
             yield [
                 self._with_marker(self._with_provider_url(descriptor, item), item)
                 for descriptor, item in zip(
-                    map_records(items, plan.mapping, provider_id=self.id), items, strict=True
+                    map_records(
+                        (self._assignment_record(item, plan.object_type) for item in items),
+                        plan.mapping,
+                        provider_id=self.id,
+                    ),
+                    items,
+                    strict=True,
                 )
             ]
 
@@ -438,14 +421,11 @@ class NetBoxInventoryProvider(InventoryProvider):
         because the read moved would quietly widen a provider from three hundred devices
         to fifty thousand, which is the opposite of what it was set for.
         """
-        configured = self.config.object_queries.get(plan.object_type, "")
-        scoped = self.config.device_query if plan.object_type == "device" else ""
-        saved = self._saved_scope_query(plan)
-        return _intersect_queries(plan.base_query, scoped, configured, saved)
+        return _intersect_queries(plan.base_query, self._saved_scope_query(plan))
 
     def _saved_scope_query(self, plan: _FetchPlan) -> str:
         """Compile the active named scope into NetBox's filter query language."""
-        scope = self.config.active_scope()
+        scope = self.config.inventory_filter
         if scope is None:
             return ""
 
@@ -458,14 +438,14 @@ class NetBoxInventoryProvider(InventoryProvider):
         advertised = set((plan.query_schema or {}).get("properties") or {})
         for clause in scope.queries.get(plan.object_type, ()):
             parameter = f"{clause.field}{_SCOPE_LOOKUP_SUFFIX[clause.lookup]}"
-            if parameter not in advertised:
+            if clause.schema_validation == "required" and parameter not in advertised:
                 raise ValueError(f"NetBox {plan.object_type} does not advertise filter {parameter}")
-            query = _intersect_queries(query, urlencode({parameter: clause.value}))
+            query = _intersect_queries(query, urlencode({parameter: clause.value}, doseq=True))
         return query
 
     def _tenant_scope_filter(self, plan: _FetchPlan) -> tuple[str, str] | None:
         """The tenant filter this instance proved the family accepts, if any."""
-        scope = self.config.active_scope()
+        scope = self.config.inventory_filter
         if scope is None or not scope.tenant_slug:
             return None
         query_fields = set((plan.query_schema or {}).get("properties") or {})
@@ -482,7 +462,7 @@ class NetBoxInventoryProvider(InventoryProvider):
         exemption is therefore explicit: it is for shared reference data or a NetBox
         account whose object permissions enforce the boundary independently.
         """
-        scope = self.config.active_scope()
+        scope = self.config.inventory_filter
         if scope is None or not scope.tenant_slug:
             return True
         return (
@@ -540,7 +520,12 @@ class NetBoxInventoryProvider(InventoryProvider):
             )
         payload = await self._object_payload(plan, identifier, context)
         return self._with_provider_url(
-            map_record(payload, plan.mapping, provider_id=self.id), payload
+            map_record(
+                self._assignment_record(payload, plan.object_type),
+                plan.mapping,
+                provider_id=self.id,
+            ),
+            payload,
         )
 
     async def _object_payload(
@@ -687,7 +672,21 @@ class NetBoxInventoryProvider(InventoryProvider):
         """Read this instance's schema and custom fields, and derive a catalogue."""
         # NetBox negotiates on Accept and defaults to YAML; drf-spectacular takes the
         # format explicitly.
-        schema = await self._request_json("/api/schema/?format=json", context)
+        discovery_url = str(self.config.discovery_url or self.config.url)
+        cache = getattr(self._services, "schema_cache", None)
+        schema = await cache.get(self.discovery_cache_key) if cache is not None else None
+        refresh = schema is None or context.operation == "discover"
+        if refresh:
+            schema = await self._request_json(
+                "/api/schema/?format=json", context, base_url=discovery_url
+            )
+        else:
+            # Cached structure is not proof this provider can access the source.
+            # OPTIONS runs the endpoint's permission checks without generating the
+            # OpenAPI document again. Object reads retain their own authorization.
+            await self._request_json(
+                "/api/schema/", context, method="OPTIONS", base_url=discovery_url
+            )
         custom_fields = await self._paginated(
             "/api/extras/custom-fields/",
             context,
@@ -698,7 +697,10 @@ class NetBoxInventoryProvider(InventoryProvider):
             # page limit still bounds the read, and it fails loudly.
             result_limit=None,
         )
-        return derive_catalogue(schema, custom_fields=custom_fields), custom_fields
+        derived = derive_catalogue(schema, custom_fields=custom_fields)
+        if refresh and cache is not None:
+            await cache.put(self.discovery_cache_key, schema)
+        return derived, custom_fields
 
     async def _discovery_report(self, context: ProviderCallContext) -> DiscoveryReport | None:
         """The connection test's summary of the same description.
@@ -725,9 +727,12 @@ class NetBoxInventoryProvider(InventoryProvider):
         context: ProviderCallContext,
         *,
         client: httpx.AsyncClient | None = None,
+        method: str = "GET",
+        base_url: str | None = None,
     ) -> dict[str, Any]:
-        await self._services.validate_url(str(self.config.url), operation=context.operation)
-        url = self._request_url(path_or_url, context.operation)
+        base_url = base_url or str(self.config.url)
+        await self._services.validate_url(base_url, operation=context.operation)
+        url = self._request_url(path_or_url, context.operation, base_url=base_url)
         token = await self._services.resolve_secret_ref(
             self.config.token_ref, operation=context.operation
         )
@@ -749,7 +754,7 @@ class NetBoxInventoryProvider(InventoryProvider):
                         # Streamed rather than fetched whole: the status arrives before
                         # the body does, so an error response is never read at all, and
                         # a success is read under the cap in _read_capped.
-                        async with client.stream("GET", url, headers=headers) as resp:
+                        async with client.stream(method, url, headers=headers) as resp:
                             if (
                                 resp.status_code in {401, 403}
                                 and auth_index < len(authorization_values) - 1
@@ -831,8 +836,8 @@ class NetBoxInventoryProvider(InventoryProvider):
             retryable=True,
         )
 
-    def _request_url(self, path_or_url: str, operation: str) -> str:
-        base_url = str(self.config.url)
+    def _request_url(self, path_or_url: str, operation: str, *, base_url: str | None = None) -> str:
+        base_url = base_url or str(self.config.url)
         parsed = urlparse(path_or_url)
         if parsed.scheme or parsed.netloc:
             if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -1035,6 +1040,20 @@ class NetBoxInventoryProvider(InventoryProvider):
                 return items[:result_limit]
         return items
 
+    @staticmethod
+    def _assignment_record(item: Mapping[str, Any], object_type: str) -> Mapping[str, Any]:
+        if object_type != "ip_address":
+            return item
+        target = {"dcim.interface": "interface", "virtualization.vminterface": "vm_interface"}.get(
+            str(item.get("assigned_object_type"))
+        )
+        # Synthetic keys cannot be supplied by an upstream record for the other type.
+        result = {**item, "_hegemony_interface": None, "_hegemony_vm_interface": None}
+        assigned = item.get("assigned_object")
+        if target and isinstance(assigned, Mapping):
+            result[f"_hegemony_{target}"] = {"id": assigned.get("id")}
+        return result
+
     def _with_provider_url(
         self, descriptor: ObjectDescriptor, item: Mapping[str, Any]
     ) -> ObjectDescriptor:
@@ -1062,7 +1081,11 @@ class NetBoxInventoryProvider(InventoryProvider):
             if self._origin(parsed) != self._origin(urlparse(str(self.config.url))):
                 continue
             path = parsed.path.replace("/api/", "/", 1) if key == "url" else parsed.path
-            return f"{parsed.scheme}://{parsed.netloc}{path}"
+            public = urlparse(str(self.config.public_url or self.config.url))
+            base = urlparse(str(self.config.url)).path.rstrip("/")
+            if base and path.startswith(base + "/"):
+                path = path[len(base) :]
+            return f"{public.scheme}://{public.netloc}{public.path.rstrip('/')}/{path.lstrip('/')}"
         return None
 
     def _error(

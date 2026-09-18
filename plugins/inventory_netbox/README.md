@@ -35,20 +35,19 @@ rendered automatically and `token_ref` gets a secret picker.
 | `auth_fallback_schemes` | no | `["Token"]` | Schemes retried on auth failure |
 | `verify_tls` | no | `true` | Verify the TLS certificate |
 | `schema_discovery` | no | `false` | Have the connection test also ask this NetBox what it serves — see [Ask an instance what it has](#ask-an-instance-what-it-has). Off by default: the schema is several megabytes |
-| `device_query` | no | `""` | NetBox device filter applied to **every** device read, e.g. `status=active&role=wan-edge` |
 | `site_tree_source` | no | `region` | Which NetBox hierarchy becomes the site tree: `region`, `site_group` or `none`. The other axis is still tagged |
 | `tag_key_prefix` | no | `tag:` | Prefix for NetBox tag slugs surfaced as filterable device tags. Set to `""` for bare keys |
 | `status_map` | no | built-in | Maps a NetBox device status slug to a maintenance state (`active`, `maintenance`, `disabled`) |
 | `field_map` | no | built-in | Maps credential-reference fields (`access_config.*`) to NetBox custom-field paths; historical non-credential defaults are accepted but ignored |
 | `default_access_config` | no | `{}` | Access-config defaults applied to every device |
-| `object_queries` | no | `{}` | Per-family NetBox filter, e.g. `{"interface": "mgmt_only=false"}` — `device_query` for everything that is not a device |
-| `inventory_scopes` | no | `[]` | Named schema-aware filter sets, built in the provider form and carried by Configuration Exchange |
-| `active_inventory_scope` | no | `null` | Name of the saved scope combined with `device_query` and `object_queries` |
+| `inventory_filter` | no | `{}` | One tenant mapping and visible per-family filter rule set for this provider |
+| `public_url` | no | connection URL | Browser-accessible NetBox base URL used for source links |
+| `discovery_url` | no | connection URL | Canonical NetBox base URL for shared schema discovery when connections use aliases |
 | `page_size` | no | `100` | Records requested per NetBox API page (1–1000) |
 | `timeout_seconds` | no | `10` | Per-request timeout |
 | `max_response_bytes` | no | `67108864` | Largest response body this provider will read. A timeout bounds how *long* a read may take; this bounds how *much* it may return, which is a different failure — a source answering steadily and forever never goes quiet. Generous by default because `/api/schema/` really is several megabytes. |
 
-**Reading only what changed.** This provider declares the `delta` capability: NetBox stamps `last_updated` on every object and filters on it, so when Hegemony hands back a marker the read becomes `?last_updated__gte=...`. `__gte` rather than `__gt` on purpose — two objects saved in the same instant share a timestamp, and excluding the boundary would drop whichever of them the previous read did not reach. A configured `object_queries` or `device_query` filter still applies, so a deliberately narrow provider stays narrow on a delta pass. Enabling it is the platform's setting, not this plugin's.
+**Reading only what changed.** This provider declares the `delta` capability: NetBox stamps `last_updated` on every object and filters on it, so when Hegemony hands back a marker the read becomes `?last_updated__gte=...`. `__gte` rather than `__gt` on purpose — two objects saved in the same instant share a timestamp, and excluding the boundary would drop whichever of them the previous read did not reach. The configured `inventory_filter` still applies, so a deliberately narrow provider stays narrow on a delta pass. Enabling it is the platform's setting, not this plugin's.
 
 Minimal config:
 
@@ -98,17 +97,10 @@ locally-set state is not overwritten by a sync. Override the table per provider 
 
 ### Scoping which devices sync
 
-Devices are an object family, and without a filter a provider imports the **entire**
-NetBox device table. `device_query` sets a baseline filter applied
-to every device read:
-
-```json
-{ "device_query": "status=active&role=wan-edge&tag=managed" }
-```
-
-A caller-supplied query (a run-form preview, for instance) is appended to it, and NetBox
-ANDs the two. Everything that is not a device is scoped the same way, per family, with
-[`object_queries`](#scoping-each-family).
+Without filters, a provider imports the entire NetBox device table. Add device rules in
+**Inventory filters**, for example `status equals active` and `tag equals managed`.
+These restrictions apply to every read, including previews, single-object lookups and
+delta synchronization. Caller-supplied restrictions are ANDed with the configured rules.
 
 ### Extra device fields
 
@@ -125,7 +117,9 @@ NetBox UI page
 for that object, so Hegemony can offer an "Open in NetBox" link. It is read from NetBox's
 own `display_url`, falling back to the API `url` with its `/api` prefix dropped, and is
 pinned to the configured provider origin — a NetBox echoing another host cannot turn the
-link into an off-site redirect.
+link into an off-site redirect. Set `public_url` when the browser uses a different base
+URL, such as `http://localhost:8001/` while the API connects to `http://netbox:8080/`.
+Validated source paths are rewritten onto that configured public base.
 
 ### Site identity
 
@@ -223,82 +217,60 @@ and the key is ignored, so a provider configured while it existed needs no edit.
 Which families are worth reading is still a real question — an interface table is two
 orders of magnitude larger than a device table — but it is asked once, in the form.
 
-### Scoping each family
+### Inventory filters and mapping NetBox tenants
 
-`object_queries` is to a family what `device_query` is to devices — a NetBox filter
-applied to every read of it:
+Each provider has one **Inventory filters** configuration, tuned over time. Use another
+provider instance when an organization needs a different inventory from the same NetBox.
+The editor offers query fields and operators reported by the instance's schema.
+
+Set **NetBox tenant slug** to apply `tenant=<slug>` to selected families advertising that
+filter and `slug=<slug>` to the tenant family. Families without a tenant filter are
+suppressed unless explicitly allowed under `tenant_scope_exemptions`. An additional rule
+does not prove tenant ownership: allow such families only for intentionally shared data
+or when the NetBox token enforces the boundary. For contacts, explicitly allow the family
+and add a `group equals gondor` rule:
 
 ```json
 {
-  "object_queries": {
-    "interface": "mgmt_only=false&enabled=true",
-    "ip_address": "status=active"
+  "inventory_filter": {
+    "tenant_slug": "gondor",
+    "tenant_scope_exemptions": ["contact"],
+    "queries": {
+      "contact": [{"field": "group", "lookup": "exact", "value": "gondor"}],
+      "device": [{"field": "tag", "lookup": "exact", "value": "managed"}]
+    }
   }
 }
 ```
 
-A caller-supplied query is appended, and NetBox ANDs the two. Keys are object type ids; a
-key naming no family is rejected.
+All rules constrain list, preview and single-object reads. Repeated values within one
+rule preserve NetBox's parameter semantics (usually OR, but tags use AND). Separate rules
+are ANDed; contradictory restrictions fail rather than widening the imported inventory.
+Saving filter changes clears delta watermarks and forces a full reconciliation, marking
+records outside the new filter stale. Configure each Hegemony organization's provider
+with its own tenant slug and preferably its own least-privilege NetBox token. Filters are
+a synchronization boundary; NetBox permissions provide the authorization boundary.
 
-The filter bounds what the provider can see of that family, not just what it lists, so
-reading one object obeys it too: a scoped family resolves an id through the filtered list
-endpoint, and an object outside the scope reads as absent rather than being returned to a
-caller that happens to know its id.
+Existing `device_query`, `object_queries` and the active legacy `inventory_scopes` entry
+are converted into this single visible rule set during validation. Inactive presets are
+retired. Saving persists the normalized configuration. Legacy raw parameters remain usable
+even if an older schema omitted them; newly selected fields use schema validation.
 
-### Saved scopes and mapping NetBox tenants
+### Shared discovery
 
-The provider form can store several named inventory scopes and select one as active.
-After **Discover**, the rule builder uses this NetBox instance's own OpenAPI query
-parameters: the family picker contains only selected families, the field picker contains
-only filters the endpoint advertised, and enum/type information travels with each field.
-The advanced raw filters above remain available and are combined with the active scope.
+Hegemony stores the NetBox OpenAPI document for 24 hours, keyed by normalized instance URL.
+Opening a saved provider's object-type editor or starting sync automatically discovers it
+or reuses that document. **Discover** forces an immediate refresh; other connections adopt
+the updated schema on their next editor load or sync. A refresh affects schema metadata,
+not another provider's object-type selection or filters. Device/site counts in discovery
+refer to projections of already imported objects; run Sync to import remote inventory.
 
-The common case has a shortcut. Set **Map NetBox tenant slug** on a saved scope and the
-provider applies:
-
-- `slug=<tenant>` to the `tenant` family;
-- `tenant=<tenant>` to every selected family whose discovered mapping and query schema
-  expose a tenant; and
-- no guessed filter to a family such as `interface` that does not carry a tenant. Such
-  a family is suppressed unless the scope explicitly exempts it.
-
-For example, the stored configuration behind a Hegemony organization can contain:
-
-```json
-{
-  "inventory_scopes": [
-    {
-      "name": "Tenant A",
-      "tenant_slug": "tenant-a",
-      "queries": {
-        "device": [
-          { "field": "status", "lookup": "not", "value": "offline" }
-        ]
-      },
-      "tenant_scope_exemptions": ["region"]
-    }
-  ],
-  "active_inventory_scope": "Tenant A"
-}
-```
-
-Configure the same NetBox URL in another Hegemony organization with a different saved
-scope to partition one source across both organizations. Provider ids, rows, watermarks
-and sync history remain organization-scoped. The form lists every selected family that
-does not accept the tenant shortcut. It is suppressed by default, including when it has
-another narrowing rule: a `status` or `device_id` query does not prove tenant ownership.
-Check its exemption only when it is intentionally shared or the NetBox account's object
-permissions enforce the boundary. Regions and site groups are the common shared case;
-set `site_tree_source` to `none` when they must not cross the boundary.
-
-These queries are a synchronization boundary, not an authorization boundary. Use a
-different least-privilege NetBox token/account for each Hegemony organization when the
-separation is security-sensitive. An unrestricted shared token can read whatever a
-future configuration permits.
-
-Changing the active scope or any of its rules is a provider config change. Hegemony
-forgets that provider's delta watermarks and forces a full pass, so records that left
-the scope become stale instead of remaining silently active.
+Only the API schema is shared across organizations. Each connection authenticates its own
+schema access, reads its own custom fields, and derives its own mappings and bindings.
+Inventory rows, selections, tokens, watermarks and sync history remain provider-specific.
+For connections using URL aliases for the same NetBox, set `discovery_url` to a common
+canonical base URL. Schema requests actually use that URL with each provider's credentials;
+object reads still use `url`. Older hosts without a schema cache fetch independently.
 
 ### The catalogue
 
@@ -392,7 +364,7 @@ declining to serve devices at all — would let the sync succeed while refreshin
 and the first anyone would know is a run targeting a device whose address changed weeks
 earlier. One loud failure that says what to do is the kinder one.
 
-`device_query` still scopes which devices are read, and `site_tree_source` still picks
+`inventory_filter` scopes which devices are read, and `site_tree_source` still picks
 the hierarchy. `status_map`, `tag_key_prefix`, `default_access_config` and the
 `field_map` credential paths are carried into the binding that discovery returns.
 Only `access_config.*` entries in `field_map` are configurable. Historical
@@ -412,9 +384,10 @@ cluster. Edges cite the same external id the target row is keyed on — NetBox's
 objects and devices, the site slug for sites — so an edge and the row it reaches can
 never disagree about the key.
 
-Polymorphic references are stored as data rather than as edges: an IP address keeps
-`assigned_object_type` and `assigned_object_id` as attributes, because one edge cannot
-name a target type that varies per row.
+IP addresses retain `assigned_object_type` and `assigned_object_id`, and also expose the
+assigned interface plus its parent device or virtual machine as named attributes and
+relationships. The interface edge follows the actual assignment type. Unassigned IPs
+have no assignment edges.
 
 ### NetBox versions
 

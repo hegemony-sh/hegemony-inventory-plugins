@@ -120,6 +120,7 @@ UNTYPED_PATHS: Mapping[tuple[str, str], str] = MappingProxyType(
         ("/api/extras/tagged-objects/", "object"): "object.display",
         ("/api/ipam/fhrp-group-assignments/", "interface"): "interface.name",
         ("/api/ipam/ip-addresses/", "assigned_object"): "assigned_object.name",
+        ("/api/tenancy/contact-assignments/", "object"): "object.display",
         ("/api/ipam/prefixes/", "scope"): "scope.name",
         ("/api/ipam/services/", "parent"): "parent.display",
         ("/api/ipam/vlan-groups/", "scope"): "scope.name",

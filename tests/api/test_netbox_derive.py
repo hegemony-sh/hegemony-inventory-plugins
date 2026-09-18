@@ -567,3 +567,24 @@ def test_the_site_tree_is_keyed_the_way_the_platform_already_stored_it() -> None
     assert by_id["region"].identity == "id"
     site_edge = next(edge for edge in by_id["device"].relationships if edge.rel == "site")
     assert site_edge.source == "site.slug"
+
+
+def test_real_netbox_47_schema_preserves_strings_and_has_no_opaque_warnings() -> None:
+    schema = json.loads(_FIXTURE.with_name("netbox-4.7-schema.json").read_text())
+    result = derive_catalogue(schema)
+    assert result.source_version is not None
+    assert result.source_version.startswith("4.7")
+    assert len(result.object_types) == 117
+    assert result.warnings == ()
+    by_id = {entry.id: entry for entry in registered_catalogue(result)}
+    for family, fields in {
+        "ip_address": ["dns_name"],
+        "contact": ["email", "link"],
+        "cable": ["color"],
+        "circuit_type": ["color"],
+    }.items():
+        for name in fields:
+            assert by_id[family].spec.field_schema["properties"][name]["type"] == "string"
+            assert by_id[family].mapping.field_map[name] == name
+    assert by_id["extras.config_context_profiles"].mapping.field_map["schema"] == "schema"
+    assert by_id["tenancy.contact_assignments"].mapping.field_map["object"] == "object.display"

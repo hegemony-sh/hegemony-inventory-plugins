@@ -8,7 +8,7 @@ Written by ``scripts/generate_catalogue.py`` from a recorded NetBox 4.3.0-Docker
 through the same deriver that reads a live instance. Change the deriver or the overlay
 and regenerate; editing this file by hand puts it beyond the reach of both.
 
-104 families, 1312 attributes, 211 relationships.
+104 families, 1314 attributes, 215 relationships.
 
 This is a *seed*, not the last word. A provider that has discovered its own instance
 uses what that instance said it serves; this is what it offers until then, and what it
@@ -3662,11 +3662,17 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
             "custom_fields": _json("custom_fields"),
             "created": _text("created"),
             "last_updated": _text("last_updated"),
+            "device": _text("assigned_object.device.name"),
+            "virtual_machine": _text("assigned_object.virtual_machine.name"),
         },
         relationships=(
             _rel("vrf", "vrf", "vrf.id"),
             _rel("tenant", "tenant", "tenant.id"),
             _rel("nat_inside", "ip_address", "nat_inside.id"),
+            _rel("device", "device", "assigned_object.device.id"),
+            _rel("virtual_machine", "virtual_machine", "assigned_object.virtual_machine.id"),
+            _rel("interface", "interface", "_hegemony_interface.id"),
+            _rel("vm_interface", "vm_interface", "_hegemony_vm_interface.id"),
         ),
     ),
     NetBoxObjectType(
@@ -4017,7 +4023,7 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         plural="Contact Assignments",
         description="NetBox contact assignments, as served by /api/tenancy/contact-assignments/.",
         name_field="object_id",
-        columns=("object_id", "role", "object_type", "contact", "priority"),
+        columns=("role", "contact", "priority"),
         search_fields=("object_id",),
         attributes={
             "object_type": _text("object_type", nullable=False),

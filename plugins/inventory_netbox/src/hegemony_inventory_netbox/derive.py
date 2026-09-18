@@ -284,7 +284,7 @@ class _SchemaIndex:
             declared = properties.get(candidate, {})
             if declared.get("readOnly"):
                 continue
-            if declared.get("type") in _SCALAR_TYPES:
+            if isinstance(declared.get("type"), str) and declared["type"] in _SCALAR_TYPES:
                 return str(candidate)
         return "name" if "name" in properties else "id"
 
@@ -317,7 +317,9 @@ def _choice(prop: Mapping[str, Any]) -> tuple[str, tuple[str | int, ...]] | None
     value = sub["value"] if isinstance(sub["value"], Mapping) else {}
     value_type = value.get("type")
     return (
-        str(value_type) if value_type in _SCALAR_TYPES else "string",
+        str(value_type)
+        if isinstance(value_type, str) and value_type in _SCALAR_TYPES
+        else "string",
         _enum_of(value),
     )
 
@@ -536,6 +538,27 @@ def _derive_family(
         custom_field_attributes(custom_fields, content_type=family.content_type(overlay))
     )
 
+    if family.endpoint == "/api/ipam/ip-addresses/":
+        for name, path, target_endpoint in (
+            ("device", "assigned_object.device", "/api/dcim/devices/"),
+            (
+                "virtual_machine",
+                "assigned_object.virtual_machine",
+                "/api/virtualization/virtual-machines/",
+            ),
+        ):
+            attributes[name] = Attr(f"{path}.name")
+            target = by_endpoint.get(target_endpoint)
+            if target:
+                relationships.append(RelationshipMapping(name, target, f"{path}.id"))
+        for name, endpoint in (
+            ("interface", "/api/dcim/interfaces/"),
+            ("vm_interface", "/api/virtualization/interfaces/"),
+        ):
+            target = by_endpoint.get(endpoint)
+            if target:
+                relationships.append(RelationshipMapping(name, target, f"_hegemony_{name}.id"))
+
     presentation = overlay.presentation.get(family.endpoint)
     singular = _singularize(family.segment)
     # What this family calls itself. NetBox has no universal name property -- a prefix
@@ -647,6 +670,67 @@ def _query_schema(schema: Mapping[str, Any], endpoint: str) -> dict[str, Any]:
     return {"type": "object", "properties": properties} if properties else {}
 
 
+def _property_shape(
+    prop: Mapping[str, Any], index: _SchemaIndex, seen: frozenset[str] = frozenset()
+) -> dict[str, Any]:
+    """Resolve scalar aliases and equivalent primitive union branches in OpenAPI 3.1.
+
+    NetBox uses anyOf for blank formatted strings. A union is only collapsed when
+    all its non-null alternatives have the same primitive type; polymorphic object
+    references retain their original shape for the overlay.
+    """
+    result = dict(prop)
+    ref = prop.get("$ref")
+    if isinstance(ref, str) and ref not in seen:
+        target = index.component(ref.rsplit("/", 1)[-1])
+        if target and not target.get("properties"):
+            return _property_shape(
+                {**target, **{k: v for k, v in prop.items() if k != "$ref"}}, index, seen | {ref}
+            )
+    declared = result.get("type")
+    if isinstance(declared, list):
+        non_null = [item for item in declared if item != "null"]
+        if len(non_null) == 1:
+            result["type"] = non_null[0]
+            result["nullable"] = "null" in declared
+    for keyword in ("anyOf", "oneOf", "allOf"):
+        branches = result.get(keyword)
+        if not isinstance(branches, list) or not branches:
+            continue
+        shapes = [
+            _property_shape(item, index, seen) for item in branches if isinstance(item, Mapping)
+        ]
+        types = {
+            shape.get("type")
+            for shape in shapes
+            if isinstance(shape.get("type"), str) and shape.get("type") != "null"
+        }
+        if (
+            len(types) == 1
+            and types <= _SCALAR_TYPES
+            and all(
+                isinstance(shape.get("type"), str) and shape["type"] in types | {"null"}
+                for shape in shapes
+            )
+        ):
+            result["type"] = next(iter(types))
+            result["nullable"] = bool(result.get("nullable")) or any(
+                shape.get("nullable") or shape.get("type") == "null" for shape in shapes
+            )
+            result.pop(keyword, None)
+            # Branch-specific constraints are not constraints on the whole union.
+            if all("enum" in shape for shape in shapes):
+                result["enum"] = list(
+                    dict.fromkeys(v for shape in shapes for v in shape["enum"] if v is not None)
+                )
+    if not result.get("type") and result.get("enum"):
+        values = [v for v in result["enum"] if v is not None]
+        if values and all(isinstance(v, str) for v in values):
+            result["type"] = "string"
+            result["nullable"] = None in result["enum"]
+    return result
+
+
 def _derive_property(
     name: str,
     prop: Mapping[str, Any],
@@ -657,6 +741,7 @@ def _derive_property(
     external_id_keys: Mapping[str, str],
     warnings: list[str],
 ) -> tuple[Attr | None, RelationshipMapping | None]:
+    prop = _property_shape(prop, index)
     nullable = bool(prop.get("nullable"))
 
     component = _referenced_component(prop)
@@ -664,7 +749,9 @@ def _derive_property(
         key = index.natural_key(component)
         key_type = index.properties(component).get(key, {}).get("type")
         path = f"{name}.{key}"
-        json_type = str(key_type) if key_type in _SCALAR_TYPES else "string"
+        json_type = (
+            str(key_type) if isinstance(key_type, str) and key_type in _SCALAR_TYPES else "string"
+        )
         target = by_component.get(_dereferenced_family(component))
         if target is None:
             return Attr(path, json_type, nullable), None
@@ -681,7 +768,7 @@ def _derive_property(
         return Attr(f"{name}.value", value_type, nullable, values), None
 
     declared = prop.get("type")
-    if declared in _SCALAR_TYPES:
+    if isinstance(declared, str) and declared in _SCALAR_TYPES:
         # A bare enum: the same choice set, rendered flat rather than as an object.
         return Attr(name, str(declared), nullable, _enum_of(prop)), None
     if declared == "array":
@@ -690,7 +777,9 @@ def _derive_property(
         return Attr(name, "object", nullable), None
 
     # No type at all: a generic reference, or free-form JSON. Only the overlay knows.
-    if (family.endpoint, name) in overlay.untyped_objects:
+    if (family.endpoint, name) in overlay.untyped_objects or (
+        family.endpoint == "/api/extras/config-context-profiles/" and name == "schema"
+    ):
         return Attr(name, "object", True), None
     path = overlay.untyped_paths.get((family.endpoint, name))
     if path is None:

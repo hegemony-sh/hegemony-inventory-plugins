@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import ast
 from typing import Any, Literal
+from urllib.parse import parse_qs, urlencode
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 from hegemony_inventory_sdk import MaintenanceState, validate_object_type_id
+
+from .filters import LOOKUP_SUFFIX, intersect_queries
 
 # NetBox device statuses -> the platform's MaintenanceState. "Gone or going" is
 # disabled; "not yet in service" is maintenance. Anything unlisted (including
@@ -56,7 +59,7 @@ DEFAULT_FIELD_MAP = {
 
 
 class NetBoxScopeClause(BaseModel):
-    """One typed NetBox filter in a saved inventory scope."""
+    """One visible NetBox filter rule."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -80,9 +83,10 @@ class NetBoxScopeClause(BaseModel):
         "lte",
         "empty",
     ] = "exact"
-    value: str = Field(..., min_length=1, max_length=2048)
+    schema_validation: Literal["required", "legacy"] = "required"
+    value: str | list[str] = Field(..., max_length=2048)
 
-    @field_validator("field", "value")
+    @field_validator("field")
     @classmethod
     def strip_scope_clause_text(cls, value: str) -> str:
         stripped = value.strip()
@@ -90,13 +94,25 @@ class NetBoxScopeClause(BaseModel):
             raise ValueError("scope clause field and value are required")
         return stripped
 
+    @model_validator(mode="after")
+    def validate_values(self) -> NetBoxScopeClause:
+        values = self.value if isinstance(self.value, list) else [self.value]
+        if not values or any(len(value) > 2048 for value in values):
+            raise ValueError("filter values are required and must be at most 2048 characters")
+        if self.schema_validation == "required":
+            if any(not value.strip() for value in values):
+                raise ValueError("filter values are required")
+            self.value = (
+                [v.strip() for v in values] if isinstance(self.value, list) else self.value.strip()
+            )
+        return self
 
-class NetBoxInventoryScope(BaseModel):
-    """A named, reusable set of filters stored with one provider configuration."""
+
+class NetBoxInventoryFilter(BaseModel):
+    """The single tenant mapping and rule set for one provider configuration."""
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(..., min_length=1, max_length=100)
     tenant_slug: str | None = Field(
         default=None,
         min_length=1,
@@ -119,14 +135,6 @@ class NetBoxInventoryScope(BaseModel):
             "Use only for shared reference data or when the NetBox token enforces the boundary."
         ),
     )
-
-    @field_validator("name")
-    @classmethod
-    def strip_scope_name(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("scope name is required")
-        return stripped
 
     @field_validator("queries")
     @classmethod
@@ -172,6 +180,12 @@ class NetBoxInventoryScope(BaseModel):
         return normalized
 
 
+class _LegacyInventoryScope(NetBoxInventoryFilter):
+    """Read-only compatibility model, never exposed in the new configuration schema."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+
+
 class NetBoxProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -206,17 +220,8 @@ class NetBoxProviderConfig(BaseModel):
             "THIS instance has: which of the offered object types it serves, what its "
             "plugins add, and which custom fields are defined on it. Off by default "
             "because that document is several megabytes on a stock install, where a "
-            "connection test is otherwise a few hundred bytes. Nothing else reads it: a "
+            "connection test is otherwise a few hundred bytes. This option affects only the connection test: a "
             "failure to fetch or parse it leaves the connection test's own result alone."
-        ),
-    )
-    device_query: str = Field(
-        "",
-        max_length=2048,
-        description=(
-            "NetBox device filter applied to every device read, e.g. "
-            "'status=active&role=wan-edge'. Auto-sync otherwise pulls the entire "
-            "device table. A caller-supplied query is appended to this one."
         ),
     )
     site_tree_source: Literal["region", "site_group", "none"] = Field(
@@ -258,28 +263,17 @@ class NetBoxProviderConfig(BaseModel):
         description="Credential-reference paths. Legacy non-credential defaults are ignored.",
     )
     default_access_config: dict[str, Any] = Field(default_factory=dict)
-    object_queries: dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "Per-family NetBox filter applied to every read of that family, the way "
-            "device_query scopes devices, e.g. {'interface': 'mgmt_only=false', "
-            "'ip_prefix': 'status=active'}. Keys are object type ids; a caller-supplied "
-            "query is appended to the configured one."
-        ),
+    inventory_filter: NetBoxInventoryFilter = Field(
+        default_factory=NetBoxInventoryFilter,
+        description="Tenant mapping and additional filters for this provider instance.",
     )
-    inventory_scopes: list[NetBoxInventoryScope] = Field(
-        default_factory=list,
-        max_length=32,
-        description=(
-            "Named schema-aware filter sets. They are stored with the provider so they "
-            "travel through Configuration Exchange; active_inventory_scope selects the "
-            "one ANDead with legacy device_query/object_queries."
-        ),
-    )
-    active_inventory_scope: str | None = Field(
+    discovery_url: HttpUrl | None = Field(
         default=None,
-        max_length=100,
-        description="Name of the saved inventory scope applied to every provider read.",
+        description="Canonical NetBox base URL used to fetch shared API schemas when connections use different aliases for the same instance. Defaults to the connection URL.",
+    )
+    public_url: HttpUrl | None = Field(
+        default=None,
+        description="Browser-accessible NetBox base URL for source links; defaults to the API connection URL.",
     )
     page_size: int = Field(
         100,
@@ -360,14 +354,6 @@ class NetBoxProviderConfig(BaseModel):
             raise ValueError("auth_fallback_schemes must be a list or comma-separated string")
         return [item for item in candidates if item]
 
-    @field_validator("device_query", mode="before")
-    @classmethod
-    def normalize_device_query(cls, value: Any) -> str:
-        """Accept a leading '?' and surrounding whitespace."""
-        if value is None:
-            return ""
-        return str(value).strip().lstrip("?").strip()
-
     @field_validator("tag_key_prefix", mode="before")
     @classmethod
     def normalize_tag_key_prefix(cls, value: Any) -> str:
@@ -395,53 +381,88 @@ class NetBoxProviderConfig(BaseModel):
             }
         return value
 
-    @field_validator("object_queries")
+    @model_validator(mode="before")
     @classmethod
-    def validate_object_queries(cls, value: dict[str, str]) -> dict[str, str]:
-        """Normalize per-family queries and reject keys naming no known family."""
-        normalized: dict[str, str] = {}
-        unknown: list[str] = []
-        for object_type, query in value.items():
-            if not isinstance(object_type, str):
-                continue
-            key = object_type.strip()
-            if not key:
-                continue
-            try:
-                validate_object_type_id(key)
-            except ValueError:
-                unknown.append(key)
-                continue
-            expression = str(query).strip().lstrip("?").strip() if query is not None else ""
-            if expression:
-                normalized[key] = expression
-        if unknown:
-            raise ValueError(
-                f"object_queries has invalid object type id(s): {', '.join(sorted(unknown))}"
+    def migrate_inventory_filters(cls, value: Any) -> Any:
+        """Flatten the active legacy scope and raw restrictions without widening reads.
+
+        Inactive presets never affected reads and are retired. Conflicting restrictions
+        remain errors. Repeated values within one raw query retain their OR semantics.
+        """
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        if not any(
+            key in value
+            for key in (
+                "inventory_scopes",
+                "active_inventory_scope",
+                "object_queries",
+                "device_query",
             )
-        return normalized
-
-    @model_validator(mode="after")
-    def validate_inventory_scopes(self) -> NetBoxProviderConfig:
-        names = [scope.name for scope in self.inventory_scopes]
-        duplicates = sorted({name for name in names if names.count(name) > 1})
-        if duplicates:
-            raise ValueError(f"inventory scope names must be unique: {', '.join(duplicates)}")
-        if self.active_inventory_scope is not None:
-            active = self.active_inventory_scope.strip()
-            if active not in names:
-                raise ValueError("active_inventory_scope must name one of inventory_scopes")
-            self.active_inventory_scope = active
-        return self
-
-    def active_scope(self) -> NetBoxInventoryScope | None:
-        """The selected saved scope, or None when raw filters are the whole scope."""
-        if self.active_inventory_scope is None:
-            return None
-        return next(
-            (scope for scope in self.inventory_scopes if scope.name == self.active_inventory_scope),
-            None,
-        )
+        ):
+            return value
+        scopes = [
+            _LegacyInventoryScope.model_validate(item).model_dump(mode="json")
+            for item in (value.pop("inventory_scopes", []) or [])
+        ]
+        names = [item["name"] for item in scopes]
+        if len(names) != len(set(names)):
+            raise ValueError("inventory scope names must be unique")
+        selected = value.pop("active_inventory_scope", None)
+        legacy = next((s for s in scopes if s.get("name") == selected), None)
+        if selected and legacy is None:
+            raise ValueError("active_inventory_scope must name one of inventory_scopes")
+        current = NetBoxInventoryFilter.model_validate(
+            value.get("inventory_filter") or {}
+        ).model_dump(mode="json", exclude_unset=True)
+        if legacy:
+            for key in ("tenant_slug", "tenant_scope_exemptions"):
+                old = legacy.get(key)
+                if key in current and current[key] != old:
+                    raise ValueError(f"Conflicting old and new inventory filter {key}")
+                if old is not None:
+                    current[key] = old
+        raw_queries = value.pop("object_queries", {}) or {}
+        if not isinstance(raw_queries, dict) or any(
+            not isinstance(family, str) or not isinstance(query, str)
+            for family, query in raw_queries.items()
+        ):
+            raise ValueError("object_queries must map object types to query strings")
+        queries: dict[str, str] = dict(raw_queries)
+        device_query = value.pop("device_query", "") or ""
+        if not isinstance(device_query, str):
+            raise ValueError("device_query must be a query string")
+        if device_query:
+            queries["device"] = intersect_queries(queries.get("device", ""), device_query)
+        legacy_parameters = {
+            family: set(parse_qs(query.lstrip("?"), keep_blank_values=True))
+            for family, query in queries.items()
+        }
+        for rules in ((legacy or {}).get("queries", {}), current.get("queries", {})):
+            for family, clauses in rules.items():
+                for clause in clauses:
+                    param = clause["field"] + LOOKUP_SUFFIX[clause.get("lookup", "exact")]
+                    queries[family] = intersect_queries(
+                        queries.get(family, ""), urlencode({param: clause["value"]}, doseq=True)
+                    )
+        current["queries"] = {
+            family: [
+                {
+                    "field": field,
+                    "lookup": "exact",
+                    "value": values[0] if len(values) == 1 else values,
+                    "schema_validation": "legacy"
+                    if field in legacy_parameters.get(family, set())
+                    else "required",
+                }
+                for field, values in parse_qs(query.lstrip("?"), keep_blank_values=True).items()
+            ]
+            for family, query in queries.items()
+            if query
+        }
+        value["inventory_filter"] = current
+        return value
 
     @field_validator("status_map")
     @classmethod

@@ -724,7 +724,7 @@ def test_saved_scope_names_are_unique_and_the_active_name_must_exist() -> None:
             "active_inventory_scope": "Tenant A",
         }
     )
-    active = config.active_scope()
+    active = config.inventory_filter
     assert active is not None
     assert active.tenant_slug == "tenant-a"
     assert active.tenant_scope_exemptions == ["interface"]
