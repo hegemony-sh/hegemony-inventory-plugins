@@ -402,9 +402,14 @@ class NetBoxProviderConfig(BaseModel):
             )
         ):
             return value
+        raw_scopes = value.pop("inventory_scopes", [])
+        if raw_scopes is None:
+            raw_scopes = []
+        if not isinstance(raw_scopes, list):
+            raise ValueError("inventory_scopes must be a list")
         scopes = [
             _LegacyInventoryScope.model_validate(item).model_dump(mode="json")
-            for item in (value.pop("inventory_scopes", []) or [])
+            for item in raw_scopes
         ]
         names = [item["name"] for item in scopes]
         if len(names) != len(set(names)):

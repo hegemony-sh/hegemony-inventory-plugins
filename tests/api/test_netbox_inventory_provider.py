@@ -1804,6 +1804,7 @@ def test_legacy_filters_migrate_without_widening_and_round_trip() -> None:
 @pytest.mark.parametrize(
     "legacy",
     [
+        {"inventory_scopes": 42},
         {"object_queries": {"contact": 42}},
         {"device_query": ["tag=managed"]},
         {"device_query": "tenant=rohan", "object_queries": {"device": "tenant=gondor"}},
