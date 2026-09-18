@@ -14,7 +14,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from time import monotonic
 from typing import Any, cast
-from urllib.parse import ParseResult, quote, urlencode, urljoin, urlparse
+from urllib.parse import ParseResult, parse_qsl, quote, urlencode, urljoin, urlparse
 
 import httpx
 
@@ -67,6 +67,31 @@ _SCOPE_LOOKUP_SUFFIX = {
     "lte": "__lte",
     "empty": "__empty",
 }
+
+
+def _intersect_queries(*queries: str) -> str:
+    """Combine restrictions without turning repeated OR filters into a union.
+
+    Repeated values within one raw query retain NetBox's native meaning. Between
+    independently configured restrictions they must intersect. Tags are NetBox's
+    explicit AND filters and can safely accumulate values.
+    """
+    combined: dict[str, list[str]] = {}
+    for query in queries:
+        current: dict[str, list[str]] = {}
+        for key, value in parse_qsl(query.lstrip("?"), keep_blank_values=True):
+            current.setdefault(key, []).append(value)
+        for key, values in current.items():
+            if key not in combined:
+                combined[key] = values
+            elif key in {"tag", "tag_id"}:
+                combined[key] = list(dict.fromkeys([*combined[key], *values]))
+            else:
+                common = [value for value in combined[key] if value in values]
+                if not common:
+                    raise ValueError(f"Conflicting NetBox scope constraints for {key}")
+                combined[key] = list(dict.fromkeys(common))
+    return urlencode([(key, value) for key, values in combined.items() for value in values])
 
 
 def _query_to_expr(query: Mapping[str, Any] | None) -> str:
@@ -413,7 +438,7 @@ class NetBoxInventoryProvider(InventoryProvider):
         configured = self.config.object_queries.get(plan.object_type, "")
         scoped = self.config.device_query if plan.object_type == "device" else ""
         saved = self._saved_scope_query(plan)
-        return "&".join(part for part in (plan.base_query, scoped, configured, saved) if part)
+        return _intersect_queries(plan.base_query, scoped, configured, saved)
 
     def _saved_scope_query(self, plan: _FetchPlan) -> str:
         """Compile the active named scope into NetBox's filter query language."""
@@ -426,10 +451,14 @@ class NetBoxInventoryProvider(InventoryProvider):
         if tenant_filter is not None:
             pairs.append(tenant_filter)
 
+        query = urlencode(pairs)
+        advertised = set((plan.query_schema or {}).get("properties") or {})
         for clause in scope.queries.get(plan.object_type, ()):
-            suffix = _SCOPE_LOOKUP_SUFFIX[clause.lookup]
-            pairs.append((f"{clause.field}{suffix}", clause.value))
-        return urlencode(pairs)
+            parameter = f"{clause.field}{_SCOPE_LOOKUP_SUFFIX[clause.lookup]}"
+            if parameter not in advertised:
+                raise ValueError(f"NetBox {plan.object_type} does not advertise filter {parameter}")
+            query = _intersect_queries(query, urlencode({parameter: clause.value}))
+        return query
 
     def _tenant_scope_filter(self, plan: _FetchPlan) -> tuple[str, str] | None:
         """The tenant filter this instance proved the family accepts, if any."""
@@ -461,11 +490,10 @@ class NetBoxInventoryProvider(InventoryProvider):
     def _object_path(self, plan: _FetchPlan, expr: str) -> str:
         """The endpoint for one family, scoped by its configured and caller filters.
 
-        Same shape as ``device_query``: the configured baseline narrows every read of
-        the family, a caller expression is appended, and NetBox ANDs the two.
+        Both configured and caller filters must hold, including repeated parameters.
         """
-        parts = [part for part in (self._object_scope(plan), expr.lstrip("?")) if part]
-        return f"{plan.endpoint}?{'&'.join(parts)}" if parts else plan.endpoint
+        query = _intersect_queries(self._object_scope(plan), expr)
+        return f"{plan.endpoint}?{query}" if query else plan.endpoint
 
     async def get_object(
         self,

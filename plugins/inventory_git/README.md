@@ -24,7 +24,7 @@ commands, checksum verification, and local-wheel development installs.
 
 ## How it works
 
-Unlike NetBox/Infrahub, the Git provider does not talk to an external API directly. You
+The Git provider reads inventory files from a Git checkout. You
 first register a **Git repository** under *Settings → Git Repositories* (URL + branch +
 credentials), and the Git inventory provider then points at a directory **inside** that
 repository. The repository fetch, credentials, caching, and SSRF protection are all handled

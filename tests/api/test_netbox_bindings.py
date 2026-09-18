@@ -19,7 +19,7 @@ from hegemony_inventory_netbox.bindings import bindings_for
 from hegemony_inventory_netbox.config import DEFAULT_FIELD_MAP, NetBoxProviderConfig
 from hegemony_inventory_sdk import ProjectionBinding
 
-_BASE = {"url": "https://netbox.example", "token_ref": "ref"}
+_BASE = {"url": "https://netbox.example", "token_ref": "{{ env('NETBOX_TOKEN') }}"}
 
 
 def _config(**overrides: object) -> NetBoxProviderConfig:
@@ -90,7 +90,7 @@ def test_status_map_and_tag_prefix_reach_the_binding() -> None:
     """Which NetBox status means maintenance, and how a NetBox tag is namespaced."""
     binding = _device(_config(status_map={"planned": "maintenance"}, tag_key_prefix="nb:"))
 
-    assert binding.maintenance_state_map == {"planned": "maintenance"}
+    assert binding.maintenance_state_map == {"*": "active", "planned": "maintenance"}
     assert (binding.tag_list, binding.tag_prefix) == ("tags", "nb:")
 
 
@@ -100,7 +100,7 @@ def test_an_empty_status_map_means_every_status_is_active() -> None:
     Falling back to the shipped default here would quietly override that, which is the
     opposite of what clearing a setting means.
     """
-    assert _device(_config(status_map={})).maintenance_state_map == {}
+    assert _device(_config(status_map={})).maintenance_state_map == {"*": "active"}
 
 
 def test_provider_defaults_travel_as_literals() -> None:

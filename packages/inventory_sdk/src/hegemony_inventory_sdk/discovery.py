@@ -111,6 +111,7 @@ class ProjectionBinding:
     external_id_prefix: str = ""
     #: Attribute path whose value maps onto a maintenance state, with the map.
     maintenance_state: str | None = None
+    # Optional "*" entry supplies a default for a present but unmapped source value.
     maintenance_state_map: Mapping[str, str] = field(default_factory=dict)
     #: Attribute paths for access-config secret references, by dotted config key.
     secret_refs: Mapping[str, str] = field(default_factory=dict)

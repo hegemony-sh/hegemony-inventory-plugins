@@ -69,10 +69,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="name",
         columns=("name", "slug", "tenant", "description"),
         search_fields=("name", "slug", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "name": _text("name", nullable=False),
             "slug": _text("slug", nullable=False),
@@ -341,10 +337,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
             "description",
         ),
         search_fields=("cid", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "cid": _text("cid", nullable=False),
             "provider_network": _text("provider_network.name", nullable=False),
@@ -407,10 +399,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         description="NetBox cables, as served by /api/dcim/cables/.",
         columns=("status", "type", "tenant", "label", "color", "length", "description"),
         search_fields=("label", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "type": Attr(
                 "type",
@@ -842,6 +830,7 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
             site_edge="site",
             maintenance_state="status",
             maintenance_state_map={
+                "active": "active",
                 "offline": "disabled",
                 "decommissioning": "disabled",
                 "planned": "maintenance",
@@ -1868,10 +1857,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="name",
         columns=("name", "status", "slug", "site", "parent", "tenant", "description"),
         search_fields=("name", "slug", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "name": _text("name", nullable=False),
             "slug": _text("slug", nullable=False),
@@ -2152,10 +2137,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="name",
         columns=("name", "status", "power_panel", "rack", "type", "supply", "description"),
         search_fields=("name", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "power_panel": _text("power_panel.name", nullable=False),
             "rack": _text("rack.name"),
@@ -2809,10 +2790,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="description",
         columns=("rack", "user", "tenant", "description"),
         search_fields=("description",),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "rack": _text("rack.name", nullable=False),
             "units": _list("units"),
@@ -3319,10 +3296,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="name",
         columns=("name", "status", "device", "identifier", "tenant", "primary_ip", "description"),
         search_fields=("name", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "name": _text("name", nullable=False),
             "device": _text("device.name", nullable=False),
@@ -3523,10 +3496,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="prefix",
         columns=("prefix", "family", "rir", "tenant", "date_added", "description"),
         search_fields=("prefix", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "family": Attr("family.value", "integer", nullable=False, enum=(4, 6)),
             "prefix": _text("prefix", nullable=False),
@@ -3555,10 +3524,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="end",
         columns=("end", "name", "slug", "rir", "start", "tenant", "description"),
         search_fields=("end", "name", "slug", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "name": _text("name", nullable=False),
             "slug": _text("slug", nullable=False),
@@ -3587,10 +3552,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="asn",
         columns=("asn", "rir", "tenant", "description"),
         search_fields=("asn", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "asn": _int("asn", nullable=False),
             "rir": _text("rir.name"),
@@ -3718,10 +3679,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="end_address",
         columns=("end_address", "status", "role", "family", "start_address", "size", "description"),
         search_fields=("end_address", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "family": Attr("family.value", "integer", nullable=False, enum=(4, 6)),
             "start_address": _text("start_address", nullable=False),
@@ -3849,10 +3806,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="name",
         columns=("name", "tenant", "description"),
         search_fields=("name", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "name": _text("name", nullable=False),
             "tenant": _text("tenant.slug"),
@@ -3933,10 +3886,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="name",
         columns=("name", "slug", "scope", "tenant", "utilization", "description"),
         search_fields=("name", "slug", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "name": _text("name", nullable=False),
             "slug": _text("slug", nullable=False),
@@ -4262,10 +4211,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="name",
         columns=("name", "status", "type", "group", "tenant", "scope", "description"),
         search_fields=("name", "description", "site", "scope"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "name": _text("name", nullable=False),
             "type": _text("type.name", nullable=False),
@@ -4712,10 +4657,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="name",
         columns=("name", "status", "identifier", "slug", "type", "tenant", "description"),
         search_fields=("name", "slug", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "identifier": _int("identifier"),
             "name": _text("name", nullable=False),
@@ -4824,10 +4765,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
             "description",
         ),
         search_fields=("name", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "name": _text("name", nullable=False),
             "status": Attr(
@@ -4898,10 +4835,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
         name_field="ssid",
         columns=("ssid", "status", "group", "vlan", "scope", "tenant", "description"),
         search_fields=("ssid", "description"),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "ssid": _text("ssid", nullable=False),
             "description": _text("description", nullable=False),
@@ -4956,10 +4889,6 @@ OBJECT_TYPES: tuple[NetBoxObjectType, ...] = (
             "description",
         ),
         search_fields=("description",),
-        query_schema={
-            "type": "object",
-            "properties": {"tenant": {"type": "string", "description": "NetBox tenant slug."}},
-        },
         attributes={
             "interface_a": _text("interface_a.name", nullable=False),
             "interface_b": _text("interface_b.name", nullable=False),

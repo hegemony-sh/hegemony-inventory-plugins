@@ -53,7 +53,7 @@ def _device_binding(config: NetBoxProviderConfig) -> ProjectionBinding:
     return replace(
         default,
         # Statuses left out of the map stay active, which is what an empty map means.
-        maintenance_state_map=dict(config.status_map or {}),
+        maintenance_state_map={"*": "active", **dict(config.status_map or {})},
         secret_refs=secret_refs or dict(default.secret_refs),
         default_access_config=dict(config.default_access_config or {}),
         tag_list="tags",

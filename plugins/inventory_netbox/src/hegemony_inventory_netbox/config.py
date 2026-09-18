@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import ast
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
@@ -16,6 +17,7 @@ from hegemony_inventory_sdk import MaintenanceState, validate_object_type_id
 # disabled; "not yet in service" is maintenance. Anything unlisted (including
 # "active") leaves the device active. Override per provider with ``status_map``.
 DEFAULT_STATUS_MAP = {
+    "active": "active",
     "offline": "disabled",
     "decommissioning": "disabled",
     "planned": "maintenance",
@@ -305,7 +307,35 @@ class NetBoxProviderConfig(BaseModel):
     def token_ref_required(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("token_ref is required")
-        return value.strip()
+        value = value.strip()
+        # A reference is exported verbatim. Never accept a literal credential here.
+        # Normalize historical URI references into the template the host resolves.
+        if "://" in value and not value.startswith("{{"):
+            scheme, _, path = value.partition("://")
+            if (
+                scheme.replace("_", "").replace("-", "").isalnum()
+                and path
+                and not any(c.isspace() for c in value)
+            ):
+                value = "{{ secret(" + repr(value) + ") }}"
+        if not (value.startswith("{{") and value.endswith("}}")):
+            raise ValueError("token_ref must be a secret(), env(), or file() reference")
+        try:
+            expression = ast.parse(value[2:-2].strip(), mode="eval").body
+        except SyntaxError as exc:
+            raise ValueError("token_ref must be a valid secret reference") from exc
+        if not (
+            isinstance(expression, ast.Call)
+            and isinstance(expression.func, ast.Name)
+            and expression.func.id in {"secret", "env", "file"}
+            and len(expression.args) == 1
+            and isinstance(expression.args[0], ast.Constant)
+            and isinstance(expression.args[0].value, str)
+            and expression.args[0].value.strip()
+            and not expression.keywords
+        ):
+            raise ValueError("token_ref must be a secret(), env(), or file() reference")
+        return value
 
     @field_validator("auth_scheme", mode="before")
     @classmethod

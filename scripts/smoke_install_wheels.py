@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import venv
 from pathlib import Path
 
 from package_paths import ROOT
@@ -18,11 +17,10 @@ from package_paths import ROOT
 EXPECTED_MODULES = (
     "hegemony_inventory_sdk",
     "hegemony_inventory_netbox",
-    "hegemony_inventory_infrahub",
     "hegemony_inventory_git",
 )
 
-EXPECTED_ENTRY_POINTS = {"netbox", "infrahub", "git"}
+EXPECTED_ENTRY_POINTS = {"netbox", "git"}
 
 
 def _python_bin(venv_dir: Path) -> Path:
@@ -31,13 +29,13 @@ def _python_bin(venv_dir: Path) -> Path:
 
 def main() -> None:
     wheels = sorted((ROOT / "dist").glob("*.whl"))
-    if len(wheels) != 4:
-        raise SystemExit(f"Expected 4 wheels in dist/, found {len(wheels)}")
+    if len(wheels) != len(EXPECTED_MODULES):
+        raise SystemExit(f"Expected {len(EXPECTED_MODULES)} wheels in dist/, found {len(wheels)}")
 
     tmp = Path(tempfile.mkdtemp(prefix="hegemony-inventory-wheel-smoke-"))
     try:
         venv_dir = tmp / "venv"
-        venv.EnvBuilder(with_pip=True).create(venv_dir)
+        subprocess.run(["uv", "venv", str(venv_dir)], check=True)
         python = _python_bin(venv_dir)
         subprocess.run(
             ["uv", "pip", "install", "--python", str(python), *map(str, wheels)],
@@ -51,7 +49,6 @@ from importlib.metadata import entry_points
 modules = (
     "hegemony_inventory_sdk",
     "hegemony_inventory_netbox",
-    "hegemony_inventory_infrahub",
     "hegemony_inventory_git",
 )
 for module in modules:
@@ -59,7 +56,7 @@ for module in modules:
 
 entries = entry_points(group="hegemony.inventory_plugins")
 names = {entry.name for entry in entries}
-expected = {"netbox", "infrahub", "git"}
+expected = {"netbox", "git"}
 missing = expected - names
 assert not missing, missing
 """

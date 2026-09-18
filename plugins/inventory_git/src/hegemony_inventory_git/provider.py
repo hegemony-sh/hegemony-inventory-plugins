@@ -126,7 +126,7 @@ class GitInventoryProvider(InventoryProvider):
             max_file_bytes=self._services.limits.max_git_file_bytes,
         )
         self._raise_load_errors(loaded, context.operation)
-        result_limit = limit or self._services.limits.max_run_targets
+        result_limit = limit
         descriptors: list[DeviceDescriptor] = []
         for device in loaded.devices:
             if matches_query(device, loaded.sites, expr):
@@ -138,7 +138,7 @@ class GitInventoryProvider(InventoryProvider):
                         entry.head_sha,
                     )
                 )
-            if len(descriptors) >= result_limit:
+            if result_limit is not None and len(descriptors) >= result_limit:
                 break
         return descriptors
 
@@ -153,8 +153,7 @@ class GitInventoryProvider(InventoryProvider):
             max_file_bytes=self._services.limits.max_git_file_bytes,
         )
         self._raise_load_errors(loaded, context.operation)
-        result_limit = limit or self._services.limits.max_preview_devices
-        return self._site_refs_from_loaded(loaded, limit=result_limit)
+        return self._site_refs_from_loaded(loaded, limit=limit)
 
     async def test_connection(self, *, context: ProviderCallContext) -> ProviderTestResult:
         start = monotonic()

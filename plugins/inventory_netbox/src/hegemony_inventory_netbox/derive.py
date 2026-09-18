@@ -548,10 +548,20 @@ def _derive_family(
     # the shape of the defect that started this work.
     external_id_key = external_id_keys.get(family.id, DEFAULT_EXTERNAL_ID_KEY)
     query_properties = dict(query_schema.get("properties") or {})
-    # NetBox's common TenantFilterSet exposes the tenant slug under 'tenant' on
-    # tenant-aware models. Keep that one high-value filter available even in reduced
-    # schemas (including the recorded fixture) that omit django-filter parameters.
-    if "tenant" in attributes:
+    # Compatibility with reduced schemas is limited to verified built-in endpoints.
+    # A serializer's tenant attribute does not prove that a custom API filters by it.
+    tenant_filter_endpoints = {
+        "/api/dcim/devices/",
+        "/api/dcim/sites/",
+        "/api/dcim/racks/",
+        "/api/ipam/prefixes/",
+        "/api/ipam/ip-addresses/",
+        "/api/ipam/vrfs/",
+        "/api/ipam/vlans/",
+        "/api/circuits/circuits/",
+        "/api/virtualization/virtual-machines/",
+    }
+    if "tenant" in attributes and family.endpoint in tenant_filter_endpoints:
         query_properties.setdefault(
             "tenant",
             {

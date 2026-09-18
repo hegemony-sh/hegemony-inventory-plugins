@@ -331,7 +331,7 @@ def test_configured_projection_bindings_use_current_provider_settings() -> None:
 
     assert set(bindings) == {"device", "site", "site_group"}
     assert bindings["site"].parent_edge == "group"
-    assert bindings["device"].maintenance_state_map == {"planned": "maintenance"}
+    assert bindings["device"].maintenance_state_map == {"*": "active", "planned": "maintenance"}
     assert bindings["device"].tag_prefix == "nb:"
 
 
@@ -724,7 +724,19 @@ async def test_active_saved_scope_maps_a_tenant_and_compiles_typed_family_rules(
             seen,
         ),
     )
-    context = ProviderCallContext(provider_id="netbox:primary", operation="read_objects")
+    context = ProviderCallContext(
+        provider_id="netbox:primary",
+        operation="read_objects",
+        object_query_schema={
+            "type": "object",
+            "properties": {
+                "tenant": {"type": "string"},
+                "slug": {"type": "string"},
+                "status__n": {"type": "string"},
+                "device_id": {"type": "integer"},
+            },
+        },
+    )
 
     await provider.list_objects("device", context=context)
     await provider.list_objects("site", context=context)
