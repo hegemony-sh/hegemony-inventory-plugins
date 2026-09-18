@@ -49,7 +49,8 @@ async def test_git_full_listing_ignores_run_and_preview_caps(tmp_path):
 
 
 def test_discovered_tenant_field_does_not_invent_a_tenant_filter():
-    schema = json.loads(pathlib.Path("tests/fixtures/netbox-4.3-schema.json").read_text())
+    fixture = pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "netbox-4.3-schema.json"
+    schema = json.loads(fixture.read_text())
     schema["paths"]["/api/plugins/review/widgets/"] = {
         "get": {
             "responses": {
@@ -169,3 +170,64 @@ def test_token_reference_preserves_supported_references(value):
         {"url": "https://netbox.example", "token_ref": value}
     )
     assert config.safe_config()["token_ref"] == value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation", ["list_objects", "iter_object_pages", "get_object", "get_site"]
+)
+@pytest.mark.parametrize("failure", ["unadvertised", "scope_conflict", "caller_conflict"])
+async def test_scope_errors_use_the_provider_error_contract(operation, failure, monkeypatch):
+    """All public read paths reject invalid scopes before sending an HTTP request."""
+    from hegemony_inventory_sdk import InventoryProviderError, ProviderErrorCode
+
+    object_type = "site" if operation == "get_site" else "device"
+    identity = "slug" if object_type == "site" else "id"
+    scope = {"name": "scope"}
+    object_queries = {}
+    query = None
+    if failure == "unadvertised":
+        scope["queries"] = {
+            object_type: [{"field": "tenant", "lookup": "contains", "value": "tenant-a"}]
+        }
+        message = "does not advertise filter tenant__ic"
+    elif failure == "scope_conflict":
+        scope["tenant_slug"] = "tenant-a"
+        object_queries[object_type] = "tenant=tenant-b"
+        message = "Conflicting"
+    else:
+        object_queries[object_type] = f"{identity}=2"
+        query = {identity: "1"}
+        message = "Conflicting"
+    provider = NetBoxInventoryProvider(
+        provider_id="netbox:review",
+        services=FakePlatformServices(),
+        config={
+            "url": "https://netbox.example",
+            "token_ref": "{{ env('NETBOX_TOKEN') }}",
+            "inventory_scopes": [scope],
+            "active_inventory_scope": "scope",
+            "object_queries": object_queries,
+        },
+    )
+
+    async def unexpected_request(*args, **kwargs):
+        raise AssertionError("invalid scope reached HTTP")
+
+    monkeypatch.setattr(provider, "_request_json", unexpected_request)
+    context = ProviderCallContext(provider_id=provider.id, operation=f"review:{operation}")
+    with pytest.raises(InventoryProviderError, match=message) as caught:
+        if operation == "list_objects":
+            await provider.list_objects(object_type, query, context=context)
+        elif operation == "iter_object_pages":
+            async for _ in provider.iter_object_pages(object_type, query, context=context):
+                pytest.fail("invalid scope yielded a page")
+        else:
+            await provider.get_object(object_type, "1", context=context)
+    envelope = caught.value.envelope
+    assert envelope.code == ProviderErrorCode.MALFORMED_QUERY
+    assert envelope.operation == context.operation
+    assert envelope.provider_id == provider.id
+    assert envelope.provider_type == "netbox"
+    assert envelope.retryable is False
+    assert isinstance(caught.value.__cause__, ValueError)

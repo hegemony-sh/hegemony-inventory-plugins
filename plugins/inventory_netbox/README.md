@@ -59,35 +59,20 @@ Minimal config:
 }
 ```
 
-Built-in `field_map` defaults:
+Active credential-reference `field_map` defaults:
 
 ```json
 {
-  "external_id": "id",
-  "name": "name",
-  "display_name": "display",
-  "hostname": "hostname",
-  "mgmt_host": "primary_ip4.address",
-  "platform": "platform.slug",
-  "model": "device_type.model",
-  "vendor": "device_type.manufacturer.name",
-  "serial": "serial",
-  "asset_tag": "asset_tag",
-  "rack": "rack.name",
-  "position": "position",
-  "tenant": "tenant.slug",
-  "location": "location.slug",
-  "mgmt_host_v6": "primary_ip6.address",
-  "site.external_id": "site.slug",
-  "site.name": "site.name",
-  "role": "role.slug",
-  "tags": "tags",
   "access_config.ssh.username_ref": "custom_fields.hegemony_ssh_username_ref",
   "access_config.ssh.password_ref": "custom_fields.hegemony_ssh_password_ref",
   "access_config.enable.password_ref": "custom_fields.hegemony_enable_password_ref",
   "access_config.ssh.private_key_ref": "custom_fields.hegemony_ssh_private_key_ref"
 }
 ```
+
+Historical non-credential entries are accepted only at their original default paths
+and discarded during validation. Overrides of those entries are rejected. Device and
+site identity and descriptive fields come from normalized objects and projection bindings.
 
 ### Platform
 
@@ -144,12 +129,10 @@ link into an off-site redirect.
 
 ### Site identity
 
-A site reaches the platform by two routes — the `/api/dcim/sites/` listing and the
-`site` object nested inside each device — and the platform keys sites on
-`(provider_id, external_id)`. Both routes therefore resolve the external id through the
-**same** `field_map` entry, `site.external_id` (default `site.slug`, so the key is the
-slug). Remapping it to `site.id` moves both routes together. Parent links use the same
-key, so the NetBox site hierarchy survives the round trip.
+Sites are stored as objects and projected into the platform's site table. Their external
+IDs use the catalogue's slug identity; device-to-site relationships and site parent
+relationships reference that same key. Projection prefixes keep regions and site groups
+separate from sites. `field_map` cannot change site identity.
 
 ### Tags
 
@@ -409,13 +392,13 @@ declining to serve devices at all — would let the sync succeed while refreshin
 and the first anyone would know is a run targeting a device whose address changed weeks
 earlier. One loud failure that says what to do is the kinder one.
 
-Nothing else changes. Every provider setting still means what it meant: `device_query`
-still scopes which devices are read, `site_tree_source` still picks the hierarchy,
-`status_map`, `tag_key_prefix`, `default_access_config` and the `field_map` credential
-paths are all carried into the binding that discovery returns. A `field_map` entry that
-reaches into NetBox's raw payload in a way a stored attribute cannot express — `vendor`,
-`mgmt_host`, `site.external_id` — is reported as a discovery warning rather than silently
-ignored.
+`device_query` still scopes which devices are read, and `site_tree_source` still picks
+the hierarchy. `status_map`, `tag_key_prefix`, `default_access_config` and the
+`field_map` credential paths are carried into the binding that discovery returns.
+Only `access_config.*` entries in `field_map` are configurable. Historical
+non-credential defaults are accepted and discarded during configuration validation;
+changing those paths is rejected there, before discovery. Identity and descriptive
+fields are defined by the normalized object mapping and projection bindings.
 
 One behaviour genuinely moves: a device's **asset tag, rack, position, tenant and
 location** used to be copied onto the device row's `descriptive`. They are attributes of

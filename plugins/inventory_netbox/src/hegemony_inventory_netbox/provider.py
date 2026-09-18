@@ -9,8 +9,8 @@ from __future__ import annotations
 import asyncio
 import builtins
 import json
-from collections.abc import AsyncIterator, Iterable, Mapping
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
+from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from time import monotonic
 from typing import Any, cast
@@ -348,8 +348,10 @@ class NetBoxInventoryProvider(InventoryProvider):
             )
         if not self._tenant_scope_allows(plan):
             return []
+        with self._query_errors(context):
+            path = self._object_path(plan, self._with_since(_query_to_expr(query), context))
         items = await self._paginated(
-            self._object_path(plan, self._with_since(_query_to_expr(query), context)),
+            path,
             context,
             page_limit=self._services.limits.max_provider_pages,
             # None means a complete synchronization listing. Preview callers pass their
@@ -380,7 +382,8 @@ class NetBoxInventoryProvider(InventoryProvider):
             # enabled. Config edits already force this first pass to be a full read.
             yield []
             return
-        path = self._object_path(plan, self._with_since(_query_to_expr(query), context))
+        with self._query_errors(context):
+            path = self._object_path(plan, self._with_since(_query_to_expr(query), context))
         async for items in self._iter_paginated(
             path,
             context,
@@ -487,6 +490,16 @@ class NetBoxInventoryProvider(InventoryProvider):
             or plan.object_type in scope.tenant_scope_exemptions
         )
 
+    @contextmanager
+    def _query_errors(self, context: ProviderCallContext) -> Iterator[None]:
+        """Expose invalid scope declarations through the provider error contract."""
+        try:
+            yield
+        except ValueError as exc:
+            raise self._error(
+                ProviderErrorCode.MALFORMED_QUERY, str(exc), context.operation
+            ) from exc
+
     def _object_path(self, plan: _FetchPlan, expr: str) -> str:
         """The endpoint for one family, scoped by its configured and caller filters.
 
@@ -551,7 +564,9 @@ class NetBoxInventoryProvider(InventoryProvider):
             return await self._single_match(
                 plan, {plan.mapping.identity: identifier}, identifier, context
             )
-        if not self._object_scope(plan):
+        with self._query_errors(context):
+            scope = self._object_scope(plan)
+        if not scope:
             return await self._request_json(
                 f"{plan.endpoint}{quote(identifier, safe='')}/", context
             )
@@ -570,8 +585,10 @@ class NetBoxInventoryProvider(InventoryProvider):
         answering for an object outside its scope: the filter is applied, so an object
         another provider can see is indistinguishable from one that does not exist.
         """
+        with self._query_errors(context):
+            path = self._object_path(plan, _query_to_expr(query))
         matches = await self._paginated(
-            self._object_path(plan, _query_to_expr(query)),
+            path,
             context,
             page_limit=self._services.limits.max_provider_pages,
             # `id` is NetBox's primary key, so at most one row can match; asking for two

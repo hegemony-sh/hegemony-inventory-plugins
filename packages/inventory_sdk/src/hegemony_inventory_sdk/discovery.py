@@ -109,7 +109,7 @@ class ProjectionBinding:
     #: and a site may both be ``gondor`` -- unprefixed they collide into one row that is
     #: its own parent. A prefix per family makes that impossible rather than unlikely.
     external_id_prefix: str = ""
-    #: Attribute path whose value maps onto a maintenance state, with the map.
+    #: Device only: attribute path whose value maps onto a maintenance state, with the map.
     maintenance_state: str | None = None
     # Optional "*" entry supplies a default for a present but unmapped source value.
     maintenance_state_map: Mapping[str, str] = field(default_factory=dict)
@@ -166,11 +166,16 @@ class ProjectionBinding:
     #: construction, which surfaces as a failed discovery naming the field; see that
     #: module for why silence would be worse.
     #:
+    #: Each field needs a declared source path; hostname fallback paths also qualify.
+    #: Implicit row-name and management-port defaults are applied after transforms
+    #: by the host, so they do not supply a transform input.
+    #:
     #: Normalised to tuples on construction, so a binding restored from JSON -- where a
     #: tuple can only come back as a list -- compares equal to the one that was stored.
     transforms: Mapping[str, Sequence[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """Reject fields and transforms the selected projection cannot consume."""
         if self.target not in ("device", "site"):
             raise ValueError(
                 f"ProjectionBinding target must be 'device' or 'site': {self.target!r}"
@@ -179,14 +184,22 @@ class ProjectionBinding:
             raise ValueError(
                 "ProjectionBinding: a site has no hostname, device hostname, or site edge"
             )
-        if self.target == "device" and self.parent_edge:
-            raise ValueError("ProjectionBinding: a device has no parent edge; use site_edge")
+        if self.target == "device" and (self.parent_edge or self.location):
+            raise ValueError("ProjectionBinding: site-only fields are set on a device binding")
         if self.target == "site" and (
             self.hostname_fallbacks
             or self.display_name
             or self.mgmt_port
             or self.default_mgmt_port is not None
             or self.native_tags
+            or self.vendor
+            or self.model
+            or self.platform
+            or self.serial
+            or self.secret_refs
+            or self.default_access_config
+            or self.maintenance_state
+            or self.maintenance_state_map
         ):
             raise ValueError("ProjectionBinding: device-only fields are set on a site binding")
         if self.default_mgmt_port is not None and not 1 <= self.default_mgmt_port <= 65535:
@@ -206,6 +219,18 @@ class ProjectionBinding:
                     f"ProjectionBinding: transforms name no projected field: "
                     f"{', '.join(unknown_fields)}; "
                     f"projected fields are: {', '.join(sorted(TRANSFORMABLE_FIELDS))}"
+                )
+            missing_sources = sorted(
+                name
+                for name in self.transforms
+                if not getattr(self, name)
+                and not (name == "hostname" and any(self.hostname_fallbacks))
+            )
+            if missing_sources:
+                # Row-name and port defaults are applied after transforms by the host.
+                # Only hostname fallbacks pass through the declared transform chain.
+                raise ValueError(
+                    "ProjectionBinding: transforms require a source: " + ", ".join(missing_sources)
                 )
             object.__setattr__(
                 self,

@@ -119,3 +119,77 @@ def test_an_edge_can_never_carry_a_transform() -> None:
     """
     assert "site_edge" not in TRANSFORMABLE_FIELDS
     assert "parent_edge" not in TRANSFORMABLE_FIELDS
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("hostname", "primary_ip4"),
+        ("hostname_fallbacks", ("primary_ip6",)),
+        ("display_name", "display"),
+        ("device_hostname", "hostname"),
+        ("mgmt_port", "port"),
+        ("default_mgmt_port", 22),
+        ("vendor", "vendor"),
+        ("model", "model"),
+        ("platform", "platform"),
+        ("serial", "serial"),
+        ("site_edge", "site"),
+        ("native_tags", "tags"),
+        ("secret_refs", {"ssh.username_ref": "custom_fields.username_ref"}),
+        ("default_access_config", {"ssh": {"port": 22}}),
+        ("maintenance_state", "status"),
+        ("maintenance_state_map", {"offline": "disabled"}),
+    ],
+)
+def test_site_binding_rejects_device_fields(field, value):
+    """Every device-only declaration must fail instead of being silently ignored."""
+    with pytest.raises(ValueError, match="ProjectionBinding"):
+        ProjectionBinding(target="site", object_type="site", **{field: value})
+
+
+@pytest.mark.parametrize("field", ["location", "parent_edge"])
+def test_device_binding_rejects_site_fields(field):
+    """A device cannot consume a site's location or parent relationship."""
+    with pytest.raises(ValueError, match="site-only"):
+        ProjectionBinding(target="device", object_type="device", **{field: field})
+
+
+@pytest.mark.parametrize("field", sorted(TRANSFORMABLE_FIELDS))
+def test_transform_requires_an_effective_source(field):
+    """A transform on an unset source cannot produce a projected value."""
+    target = "site" if field == "location" else "device"
+    with pytest.raises(ValueError, match=f"transforms require a source: {field}"):
+        ProjectionBinding(target=target, object_type="objects", transforms={field: ["lower"]})
+
+
+@pytest.mark.parametrize("field", sorted(TRANSFORMABLE_FIELDS))
+def test_transform_accepts_a_declared_source(field):
+    """Every transformable column remains usable when its source is declared."""
+    target = "site" if field == "location" else "device"
+    binding = ProjectionBinding(
+        target=target, object_type="objects", transforms={field: ["lower"]}, **{field: field}
+    )
+    assert binding.transforms[field] == ("lower",)
+
+
+def test_hostname_transform_accepts_a_fallback_source():
+    """Hostname fallback paths use the same transform chain as the primary path."""
+    binding = ProjectionBinding(
+        target="device",
+        object_type="device",
+        hostname_fallbacks=("primary_ip6",),
+        transforms={"hostname": ["host"]},
+    )
+    assert binding.transforms["hostname"] == ("host",)
+
+
+def test_port_default_does_not_supply_a_transform_source():
+    """The host applies default ports after transforms, so a default cannot feed one."""
+    with pytest.raises(ValueError, match="transforms require a source: mgmt_port"):
+        ProjectionBinding(
+            target="device",
+            object_type="device",
+            default_mgmt_port=22,
+            transforms={"mgmt_port": ["strip"]},
+        )
