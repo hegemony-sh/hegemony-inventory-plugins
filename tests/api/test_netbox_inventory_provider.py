@@ -1909,6 +1909,13 @@ async def test_shared_discovery_authenticates_each_connection_and_keeps_custom_f
         if auth == "Bearer denied":
             return httpx.Response(403, json={"detail": "denied"})
         if request.url.path == "/api/schema/":
+            # The schema endpoint defaults to a YAML renderer for OPTIONS too.
+            if request.url.params.get("format") != "json":
+                return httpx.Response(
+                    200,
+                    text="name: OpenAPI schema\n",
+                    headers={"Content-Type": "application/vnd.oai.openapi"},
+                )
             return httpx.Response(200, json=schema if request.method == "GET" else {})
         return httpx.Response(
             200,
@@ -1948,8 +1955,16 @@ async def test_shared_discovery_authenticates_each_connection_and_keeps_custom_f
     devices_a = next(spec for spec in a.object_types if spec.id == "device")
     devices_b = next(spec for spec in b.object_types if spec.id == "device")
     assert devices_a.field_schema != devices_b.field_schema
-    with pytest.raises(InventoryProviderError):
+    # Rebuilding a connection after editing its filters must also reuse the schema.
+    reconfigured = connection("https://second.example", "rohan")
+    reconfigured.config = reconfigured.config.model_copy(
+        update={"object_queries": {"contact": "group=rohan"}}
+    )
+    await reconfigured.discover(context=context)
+    assert len([r for r in seen if r[0] == "GET" and r[2] == "/api/schema/"]) == 1
+    with pytest.raises(InventoryProviderError) as denied:
         await connection("https://third.example", "denied").discover(context=context)
+    assert denied.value.envelope.code == ProviderErrorCode.AUTH_FAILED
     await second.discover(
         context=ProviderCallContext(provider_id="netbox:primary", operation="discover")
     )

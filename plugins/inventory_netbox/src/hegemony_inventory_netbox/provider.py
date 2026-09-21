@@ -684,8 +684,10 @@ class NetBoxInventoryProvider(InventoryProvider):
             # Cached structure is not proof this provider can access the source.
             # OPTIONS runs the endpoint's permission checks without generating the
             # OpenAPI document again. Object reads retain their own authorization.
+            # OPTIONS uses the same content negotiation as GET, so request JSON
+            # explicitly here too instead of trying to parse the default YAML.
             await self._request_json(
-                "/api/schema/", context, method="OPTIONS", base_url=discovery_url
+                "/api/schema/?format=json", context, method="OPTIONS", base_url=discovery_url
             )
         custom_fields = await self._paginated(
             "/api/extras/custom-fields/",
