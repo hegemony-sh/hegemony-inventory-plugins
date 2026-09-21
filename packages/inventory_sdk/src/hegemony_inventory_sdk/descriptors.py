@@ -153,9 +153,7 @@ class DeviceDescriptor:
     # Optional: providers emit the source management port or leave it unset; the core
     # inventory service fills the default (DEFAULT_DEVICE_MGMT_PORT) on materialization.
     mgmt_port: int | None = None
-    vendor: str | None = None
-    model: str | None = None
-    current_version: str | None = None
+    attributes: dict[str, Any] = field(default_factory=dict)
     site: SiteRef | None = None
     role: str | None = None
     tags: dict[str, str] = field(default_factory=dict)
@@ -211,13 +209,11 @@ def device_to_object_descriptor(device: DeviceDescriptor) -> ObjectDescriptor:
             ),
         )
     attributes: dict[str, Any] = {
+        **device.attributes,
         "mgmt_host": device.mgmt_host,
         "mgmt_port": device.mgmt_port,
         "platform": device.platform,
         "hostname": device.hostname,
-        "vendor": device.vendor,
-        "model": device.model,
-        "current_version": device.current_version,
         "role": device.role,
         "tags": dict(device.tags),
         "native_tags": list(device.native_tags),

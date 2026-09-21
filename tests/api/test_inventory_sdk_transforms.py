@@ -130,8 +130,6 @@ def test_an_edge_can_never_carry_a_transform() -> None:
         ("device_hostname", "hostname"),
         ("mgmt_port", "port"),
         ("default_mgmt_port", 22),
-        ("vendor", "vendor"),
-        ("model", "model"),
         ("platform", "platform"),
         ("serial", "serial"),
         ("site_edge", "site"),

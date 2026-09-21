@@ -42,8 +42,6 @@ TRANSFORMABLE_FIELDS = frozenset(
         "display_name",
         "device_hostname",
         "mgmt_port",
-        "vendor",
-        "model",
         "platform",
         "serial",
         "location",
@@ -79,7 +77,7 @@ class ProjectionBinding:
     object_type: str
     #: Attribute path for the row's name. Defaults to the object's own name.
     name: str | None = None
-    #: Device only: management address, DNS hostname, vendor, model, platform and serial.
+    #: Device only: management address, DNS hostname, platform and serial.
     hostname: str | None = None
     #: Additional management-address paths, tried in order after hostname.
     hostname_fallbacks: tuple[str, ...] = ()
@@ -88,8 +86,6 @@ class ProjectionBinding:
     #: Device only: source path and provider-wide fallback for the management port.
     mgmt_port: str | None = None
     default_mgmt_port: int | None = None
-    vendor: str | None = None
-    model: str | None = None
     platform: str | None = None
     serial: str | None = None
     #: Site only: location/address text.
@@ -148,7 +144,7 @@ class ProjectionBinding:
     tag_prefix: str = ""
     #: Named conversions to apply to a projected value, by the binding field producing it.
     #:
-    #: Keyed by the name of the field on this binding -- ``"hostname"``, ``"vendor"`` --
+    #: Keyed by the name of the field on this binding -- ``"hostname"``, ``"platform"`` --
     #: rather than by the attribute path, because the same stored attribute can feed two
     #: fields that want it differently, and because a path is the provider's business
     #: while this says what the *platform column* needs.
@@ -192,8 +188,6 @@ class ProjectionBinding:
             or self.mgmt_port
             or self.default_mgmt_port is not None
             or self.native_tags
-            or self.vendor
-            or self.model
             or self.platform
             or self.serial
             or self.secret_refs

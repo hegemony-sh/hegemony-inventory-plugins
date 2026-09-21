@@ -120,8 +120,7 @@ path, so those values are **not** written into the YAML.
 | `mgmt_host` | yes | — | management IP or hostname |
 | `mgmt_port` | no | (core default) | omit to let the core inventory service fill its default (22); range 1–65535 |
 | `platform` | no | (core default) | omit to let the core inventory service fill its default |
-| `vendor` | no | — | |
-| `model` | no | — | |
+| `attributes` | no | `{}` | Inventory facts, e.g. `vendor`, `model`, and `current_version` |
 | `site` | no | — | full derived site path, for example `emea/nl/ams01` |
 | `role` | no | — | |
 | `tags` | no | `[]` | list of strings |

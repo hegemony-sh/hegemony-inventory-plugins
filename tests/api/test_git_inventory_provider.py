@@ -634,3 +634,32 @@ async def test_a_provider_that_does_not_discover_says_so(tmp_path: Path) -> None
     assert raised.value.envelope.code == ProviderErrorCode.MALFORMED_QUERY
     assert raised.value.envelope.retryable is False
     assert "discover" in raised.value.envelope.message
+
+
+def test_device_facts_flow_through_attributes_only():
+    from hegemony_inventory_sdk import device_to_object_descriptor
+
+    facts = {"vendor": "Cisco", "model": "C8300", "current_version": "17.12.4", "critical": True}
+    payload = {
+        "schema_version": 1,
+        "kind": "device",
+        "external_id": "edge",
+        "name": "edge",
+        "mgmt_host": "192.0.2.1",
+        "attributes": facts,
+    }
+    device = GitInventoryDeviceV1.model_validate(payload)
+    provider = GitInventoryProvider(
+        provider_id="git:example",
+        config=_config("inventory").model_dump(mode="json"),
+        services=FakePlatformServices(),
+    )
+    descriptor = provider._map_device(device, {}, None, "head")
+    assert descriptor.attributes == facts
+    stored = device_to_object_descriptor(descriptor)
+    for key, value in facts.items():
+        assert stored.attributes[key] == value
+    for key in ("vendor", "model", "current_version"):
+        assert not hasattr(descriptor, key)
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            GitInventoryDeviceV1.model_validate({**payload, key: "old"})

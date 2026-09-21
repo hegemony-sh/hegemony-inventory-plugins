@@ -140,8 +140,6 @@ _BINDING_FIELDS: tuple[str, ...] = (
     "display_name",
     "mgmt_port",
     "default_mgmt_port",
-    "vendor",
-    "model",
     "platform",
     "serial",
     "location",
