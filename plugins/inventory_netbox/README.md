@@ -276,6 +276,18 @@ are converted into this single visible rule set during validation. Inactive pres
 retired. Saving persists the normalized configuration. Legacy raw parameters remain usable
 even if an older schema omitted them; newly selected fields use schema validation.
 
+**Rule validation relies on the discovered schema.** The shipped catalogue is deliberately
+small — the trimmed schema it is generated from keeps no query parameters, and only the
+tenant filters are synthesised — so which filters a family accepts is known only once this
+NetBox has described itself. Hegemony runs discovery automatically when the object-type
+editor loads and before every sync, so a rule is normally validated against the
+instance's own filters. A `required` rule on a field the fallback does not advertise
+therefore fails with a `schema_validation_failed` error saying that discovery has not run
+for this provider and that Discover must run first. Seeing it means discovery itself
+failed or was never possible for this provider — a token without schema access, a proxy
+that strips `/api/schema/` — and that is what to fix. A rule migrated from a raw legacy
+query is marked `legacy` and is sent unvalidated either way.
+
 ### Shared discovery
 
 Hegemony stores the NetBox OpenAPI document for 24 hours, keyed by normalized instance URL.

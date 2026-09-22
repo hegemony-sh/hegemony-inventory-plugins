@@ -314,9 +314,15 @@ def test_token_reference_preserves_supported_references(value):
 @pytest.mark.parametrize(
     "operation", ["list_objects", "iter_object_pages", "get_object", "get_site"]
 )
-@pytest.mark.parametrize("failure", ["unadvertised", "scope_conflict", "caller_conflict"])
+@pytest.mark.parametrize(
+    "failure", ["undiscovered", "unadvertised", "scope_conflict", "caller_conflict"]
+)
 async def test_scope_errors_use_the_provider_error_contract(operation, failure, monkeypatch):
-    """All public read paths reject invalid scopes before sending an HTTP request."""
+    """All public read paths reject invalid scopes before sending an HTTP request.
+
+    A rule the shipped fallback cannot vouch for is a missing discovery, not a malformed
+    query, and is reported under the code the other "run Discover" refusal uses.
+    """
     from hegemony_inventory_sdk import InventoryProviderError, ProviderErrorCode
 
     object_type = "site" if operation == "get_site" else "device"
@@ -324,10 +330,20 @@ async def test_scope_errors_use_the_provider_error_contract(operation, failure, 
     scope = {"name": "scope"}
     object_queries = {}
     query = None
-    if failure == "unadvertised":
+    query_schema = {}
+    expected_code = ProviderErrorCode.MALFORMED_QUERY
+    if failure == "undiscovered":
         scope["queries"] = {
             object_type: [{"field": "tenant", "lookup": "contains", "value": "tenant-a"}]
         }
+        message = "discovery has not run for this provider"
+        expected_code = ProviderErrorCode.SCHEMA_VALIDATION_FAILED
+    elif failure == "unadvertised":
+        scope["queries"] = {
+            object_type: [{"field": "tenant", "lookup": "contains", "value": "tenant-a"}]
+        }
+        # This instance has described the family, and its filters do not include it.
+        query_schema = {"type": "object", "properties": {"tenant": {"type": "string"}}}
         message = "does not advertise filter tenant__ic"
     elif failure == "scope_conflict":
         scope["tenant_slug"] = "tenant-a"
@@ -353,7 +369,11 @@ async def test_scope_errors_use_the_provider_error_contract(operation, failure, 
         raise AssertionError("invalid scope reached HTTP")
 
     monkeypatch.setattr(provider, "_request_json", unexpected_request)
-    context = ProviderCallContext(provider_id=provider.id, operation=f"review:{operation}")
+    context = ProviderCallContext(
+        provider_id=provider.id,
+        operation=f"review:{operation}",
+        object_query_schema=query_schema,
+    )
     with pytest.raises(InventoryProviderError, match=message) as caught:
         if operation == "list_objects":
             await provider.list_objects(object_type, query, context=context)
@@ -363,7 +383,9 @@ async def test_scope_errors_use_the_provider_error_contract(operation, failure, 
         else:
             await provider.get_object(object_type, "1", context=context)
     envelope = caught.value.envelope
-    assert envelope.code == ProviderErrorCode.MALFORMED_QUERY
+    assert envelope.code == expected_code
+    if failure == "undiscovered":
+        assert "Run Discover on this provider first" in envelope.message
     assert envelope.operation == context.operation
     assert envelope.provider_id == provider.id
     assert envelope.provider_type == "netbox"

@@ -123,6 +123,16 @@ class _FetchPlan:
     mapping: ObjectFieldMapping
     base_query: str = ""
     query_schema: Mapping[str, Any] = field(default_factory=dict)
+    #: Whether this instance has described the family, so ``query_schema`` is what it
+    #: advertises rather than the shipped fallback. The fallback is deliberately small
+    #: -- the trimmed schema keeps no query parameters, and only the tenant filters are
+    #: synthesised -- so a rule it cannot vouch for is a discovery that has not run
+    #: rather than a malformed rule, and is reported as such.
+    discovered: bool = False
+
+
+class _DiscoveryRequired(ValueError):
+    """A scope rule names a filter that only this instance's own schema can vouch for."""
 
 
 class NetBoxInventoryProvider(InventoryProvider):
@@ -285,6 +295,7 @@ class NetBoxInventoryProvider(InventoryProvider):
                         **dict(discovered_query_schema.get("properties") or {}),
                     },
                 },
+                discovered=mapping is not None or bool(discovered_query_schema),
             )
         if mapping is None:
             return None
@@ -299,6 +310,7 @@ class NetBoxInventoryProvider(InventoryProvider):
             mapping,
             mapping.source.get("base_query", ""),
             discovered_query_schema,
+            discovered=True,
         )
 
     async def list_objects(
@@ -464,6 +476,13 @@ class NetBoxInventoryProvider(InventoryProvider):
         for clause in scope.queries.get(plan.object_type, ()):
             parameter = f"{clause.field}{_SCOPE_LOOKUP_SUFFIX[clause.lookup]}"
             if clause.schema_validation == "required" and parameter not in advertised:
+                if not plan.discovered:
+                    raise _DiscoveryRequired(
+                        f"NetBox {plan.object_type} rule on {parameter} cannot be validated: "
+                        "discovery has not run for this provider, so only the shipped "
+                        "fallback schema is available and it does not advertise that "
+                        "filter. Run Discover on this provider first."
+                    )
                 raise ValueError(f"NetBox {plan.object_type} does not advertise filter {parameter}")
             query = _intersect_queries(query, urlencode({parameter: clause.value}, doseq=True))
         return query
@@ -497,9 +516,19 @@ class NetBoxInventoryProvider(InventoryProvider):
 
     @contextmanager
     def _query_errors(self, context: ProviderCallContext) -> Iterator[None]:
-        """Expose invalid scope declarations through the provider error contract."""
+        """Expose invalid scope declarations through the provider error contract.
+
+        A rule the shipped fallback cannot vouch for is not a malformed query: the
+        query may be perfectly good, and what is missing is the instance's own
+        description. It is reported under the same code as the other "run Discover"
+        refusal, so the platform and an operator can tell the two apart.
+        """
         try:
             yield
+        except _DiscoveryRequired as exc:
+            raise self._error(
+                ProviderErrorCode.SCHEMA_VALIDATION_FAILED, str(exc), context.operation
+            ) from exc
         except ValueError as exc:
             raise self._error(
                 ProviderErrorCode.MALFORMED_QUERY, str(exc), context.operation
