@@ -47,14 +47,21 @@ def _device_binding(config: NetBoxProviderConfig) -> ProjectionBinding:
     """The device binding with this provider's choices applied."""
     field_map = config.field_map or {}
     default = BINDINGS[_DEVICE_ENDPOINT]
+    # Overlaid per key, never replaced as a whole: a config that remaps only the SSH
+    # username keeps the default password, private-key and enable paths, exactly as the
+    # device read fell back per key before projection. Replacing the map would make a
+    # one-line remap silently drop three credential references.
     secret_refs = {
-        target: path for key, target in _SECRET_REF_KEYS.items() if (path := field_map.get(key))
+        **default.secret_refs,
+        **{
+            target: path for key, target in _SECRET_REF_KEYS.items() if (path := field_map.get(key))
+        },
     }
     return replace(
         default,
         # Statuses left out of the map stay active, which is what an empty map means.
         maintenance_state_map={"*": "active", **dict(config.status_map or {})},
-        secret_refs=secret_refs or dict(default.secret_refs),
+        secret_refs=secret_refs,
         default_access_config=dict(config.default_access_config or {}),
         tag_list="tags",
         native_tags="tags",

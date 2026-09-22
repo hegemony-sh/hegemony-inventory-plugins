@@ -86,6 +86,23 @@ def test_a_remapped_credential_path_reaches_the_binding() -> None:
     )
 
 
+def test_remapping_one_credential_keeps_the_other_defaults() -> None:
+    """A ``field_map`` naming only the SSH username must not erase the other three.
+
+    The device read fell back per key before projection. A binding that replaced the
+    whole map whenever any key was mapped turned a one-line remap into three silently
+    dropped credential references, which a sync never reports.
+    """
+    config = _config(field_map={"access_config.ssh.username_ref": "custom_fields.my_ssh_user"})
+
+    assert _device(config).secret_refs == {
+        "ssh.username_ref": "custom_fields.my_ssh_user",
+        "ssh.password_ref": "custom_fields.hegemony_ssh_password_ref",
+        "ssh.private_key_ref": "custom_fields.hegemony_ssh_private_key_ref",
+        "enable.password_ref": "custom_fields.hegemony_enable_password_ref",
+    }
+
+
 def test_status_map_and_tag_prefix_reach_the_binding() -> None:
     """Which NetBox status means maintenance, and how a NetBox tag is namespaced."""
     binding = _device(_config(status_map={"planned": "maintenance"}, tag_key_prefix="nb:"))
