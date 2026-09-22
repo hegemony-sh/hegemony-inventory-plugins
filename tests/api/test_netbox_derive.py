@@ -447,6 +447,49 @@ def test_a_custom_field_is_matched_by_netboxs_own_content_type_label() -> None:
     assert _DERIVED.content_types["dcim.virtual_chassis"] == "dcim.virtualchassis"
 
 
+def _served_component(schema: dict[str, Any], endpoint: str) -> str:
+    """The schema component a list endpoint's ``results`` items are, e.g. ``VMInterface``."""
+    body = schema["paths"][endpoint]["get"]["responses"]["200"]["content"]["application/json"]
+    page = body["schema"]["$ref"].rsplit("/", 1)[-1]
+    items = schema["components"]["schemas"][page]["properties"]["results"]["items"]
+    return items["$ref"].rsplit("/", 1)[-1]
+
+
+@pytest.mark.parametrize("fixture", ["netbox-4.3-schema.json", "netbox-4.7-schema.json"])
+def test_a_model_not_named_after_its_endpoint_still_gets_netboxs_own_label(
+    fixture: str,
+) -> None:
+    """``/api/virtualization/interfaces/`` serves ``VMInterface``, not an "interface".
+
+    Singularising the segment gave ``virtualization.interface``, a label NetBox attaches
+    no custom field to, so a VM interface's custom fields were never derived. The
+    component an endpoint returns is the model's own name (less the serializer
+    decoration), so every family is checked against it here: the two the overlay
+    corrects are the only two that differ, on both recorded releases.
+    """
+    schema = json.loads(_FIXTURE.with_name(fixture).read_text())
+    custom_fields = (
+        {
+            "name": "vlan_pool",
+            "type": {"value": "text", "label": "Text"},
+            "object_types": ["virtualization.vminterface"],
+        },
+    )
+    derived = derive_catalogue(schema, custom_fields=custom_fields)
+    by_id = {entry.id: entry for entry in derived.object_types}
+
+    assert derived.content_types["virtualization.interfaces"] == "virtualization.vminterface"
+    assert derived.content_types["extras.tagged_objects"] == "extras.taggeditem"
+    vm_interface = by_id["virtualization.interfaces"].attributes
+    assert vm_interface["custom_field_vlan_pool"].path == "custom_fields.vlan_pool"
+    assert "custom_field_vlan_pool" not in by_id["dcim.interfaces"].attributes
+
+    for entry in derived.object_types:
+        component = _served_component(schema, entry.endpoint).removesuffix("WithConfigContext")
+        expected = f"{entry.app.replace('-', '_')}.{component.lower()}"
+        assert derived.content_types[entry.id] == expected, entry.endpoint
+
+
 def test_a_custom_field_applying_nowhere_relevant_is_ignored() -> None:
     assert custom_field_attributes(_CUSTOM_FIELDS, content_type="circuits.circuit") == {}
 

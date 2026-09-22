@@ -208,9 +208,10 @@ def custom_field_attributes(
     its built-in properties. They arrive nested under ``custom_fields`` on the object
     itself, which is where the dotted path points.
 
-    ``content_type`` is a Django label -- ``dcim.device``, not the endpoint. It is the
-    schema component name lowercased, which :func:`derive_catalogue` records for each
-    family it produces.
+    ``content_type`` is a Django label -- ``dcim.device``, not the endpoint. It is
+    rebuilt from the endpoint, corrected by :data:`~.overlay.CONTENT_TYPES` where the
+    model is not named after the segment, and :func:`derive_catalogue` records it for
+    each family it produces.
     """
     derived: dict[str, Attr] = {}
     for field_definition in custom_fields:

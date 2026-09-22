@@ -580,7 +580,7 @@ happens. The table is what makes that mechanical when it is worth doing.
 | `REPLACED_FIELDS` | 9 | A schema describes one release; the shipped catalogue serves a range. |
 | `EDGE_KEYS` | 1 | Which property identifies a family when something points at it. |
 | `KEEP_PROPERTIES` | 1 | A virtual chassis's member count is the fact, not a counter about other objects. |
-| `CONTENT_TYPES` | 0 | Reserved: a NetBox plugin may name endpoints the singularisation rule cannot reach. |
+| `CONTENT_TYPES` | 2 | A model not named after its endpoint segment: `/api/virtualization/interfaces/` serves `VMInterface`, `/api/extras/tagged-objects/` serves `TaggedItem`. Custom fields are matched by the Django label, so a wrong one silently matches none. |
 | `SKIP_ENDPOINTS` | 24 | NetBox's own plumbing is not inventory. |
 
 Everything else is derived, including the rules the written catalogue had to be

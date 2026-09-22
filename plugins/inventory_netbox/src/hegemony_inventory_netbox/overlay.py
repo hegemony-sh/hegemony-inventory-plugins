@@ -461,9 +461,22 @@ DEFAULT_EXTERNAL_ID_KEY = "id"
 #:
 #: A NetBox OpenAPI document names no content types at all, so the label a custom field
 #: is attached to has to be rebuilt from the endpoint. The rule -- app plus the
-#: singularised segment -- is right for every endpoint a stock 4.3 serves; this table is
-#: here because a NetBox plugin is free to name its endpoints anything.
-CONTENT_TYPES: Mapping[str, str] = MappingProxyType({})
+#: singularised segment -- is right wherever NetBox names an endpoint after its model,
+#: which is everywhere but here: the two families a stock 4.3 and 4.7 serve whose model
+#: is called something other than the singular of the URL segment. Getting one wrong is
+#: silent -- the custom fields attached to that model simply never match, so a VM
+#: interface's custom fields were never derived at all. The schema component each
+#: endpoint returns is what proves the mismatch, and ``tests/api/test_netbox_derive.py``
+#: checks every family against it so a third cannot slip in. A NetBox plugin is free to
+#: name its endpoints anything, and would be corrected the same way.
+CONTENT_TYPES: Mapping[str, str] = MappingProxyType(
+    {
+        # The model is VMInterface; the segment is the same one dcim uses for Interface.
+        "/api/virtualization/interfaces/": "virtualization.vminterface",
+        # The model is TaggedItem; the endpoint is named after what it lists.
+        "/api/extras/tagged-objects/": "extras.taggeditem",
+    }
+)
 
 
 #: Properties to keep although a noise rule would drop them, by endpoint and name.
