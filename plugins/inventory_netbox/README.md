@@ -59,6 +59,8 @@ This provider declares the `delta` capability: NetBox stamps `last_updated` on e
 
 `delta_grace_seconds` (default 300) handles the second case: the read asks for `last_updated__gte=<marker − grace>` while the marker Hegemony records stays the true highest value seen, so the tail of the previous pass is re-read at the cost of a few upserts that change nothing. Delta is opt-in, and the platform's periodic full reconciliation is what bounds how stale a nested fact can get — size that interval for how long an unnoticed IP or site change is tolerable.
 
+**Paging.** Every listing asks NetBox for `ordering=id`. NetBox pages by offset and orders by name unless told otherwise, and a name order is stable only for an instant: a record inserted while a listing runs lands wherever its name sorts, and if that is before the offset already read every later record shifts by one — the boundary record arrives twice and the platform fails the family on the duplicate. Ids only grow, so ordered by id a concurrent insert can only land on the last page. A deletion before the offset, or an edit that takes a record out of the filter, still shifts one record off the listing; nothing arrives twice and the sync does not fail, and the periodic full pass is what reads the shifted record.
+
 Minimal config:
 
 ```json

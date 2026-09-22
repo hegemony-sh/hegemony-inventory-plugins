@@ -373,9 +373,9 @@ async def test_a_configured_query_scopes_a_family_and_a_caller_query_narrows_it(
     await provider.list_objects("ip_prefix", context=_context("list_objects:ip_prefix"))
 
     assert urls == [
-        "https://netbox.example/api/dcim/interfaces/?mgmt_only=false&limit=100",
-        "https://netbox.example/api/dcim/interfaces/?mgmt_only=false&device_id=7&limit=100",
-        "https://netbox.example/api/ipam/prefixes/?status=active&limit=100",
+        "https://netbox.example/api/dcim/interfaces/?mgmt_only=false&limit=100&ordering=id",
+        "https://netbox.example/api/dcim/interfaces/?mgmt_only=false&device_id=7&limit=100&ordering=id",
+        "https://netbox.example/api/ipam/prefixes/?status=active&limit=100&ordering=id",
     ]
 
 
@@ -434,8 +434,8 @@ async def test_get_object_cannot_escape_the_family_scope(
 
     # Both reads went to the filtered list endpoint, never to /interfaces/<id>/.
     assert urls == [
-        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=41&limit=100",
-        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=99&limit=100",
+        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=41&limit=100&ordering=id",
+        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=99&limit=100&ordering=id",
     ]
 
 

@@ -313,6 +313,122 @@ async def test_sync_listing_is_not_truncated_by_the_run_target_limit(
     assert len(requested_pages) == 2
 
 
+def _offset_paged_netbox(
+    table: list[dict[str, Any]],
+    seen: list[str],
+    *,
+    before_second_page: Callable[[], object] | None = None,
+) -> httpx.MockTransport:
+    """A NetBox that pages by limit/offset over a live table, honouring ``ordering``.
+
+    The table is read afresh on every request, so ``before_second_page`` can change it
+    between the first page and the second the way a concurrent editor would.
+    """
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        seen.append(str(request.url))
+        if calls == 2 and before_second_page is not None:
+            before_second_page()
+        params = request.url.params
+        limit = int(params.get("limit", "50"))
+        offset = int(params.get("offset", "0"))
+        ordering = params.get("ordering", "name")
+        rows = sorted(table, key=lambda row: row[ordering])
+        next_url = (
+            str(request.url.copy_set_param("offset", str(offset + limit)))
+            if offset + limit < len(rows)
+            else None
+        )
+        return httpx.Response(
+            200, json={"results": rows[offset : offset + limit], "next": next_url}
+        )
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_a_record_inserted_between_pages_lands_on_the_last_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordered by ``id``, a concurrent insert cannot shift the pages already read.
+
+    Under NetBox's default name ordering the newcomer sorts wherever its name falls.
+    Before the offset already read, it pushes every later record along by one: the
+    boundary record arrives twice and the platform fails the family on the duplicate.
+    NetBox ids only grow, so ordered by id the newcomer can only be last.
+    """
+    table = [{"id": n, "name": name} for n, name in ((1, "b"), (2, "c"), (3, "d"), (4, "e"))]
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _offset_paged_netbox(
+            table, seen, before_second_page=lambda: table.append({"id": 5, "name": "a"})
+        ),
+    )
+    provider = _provider({"page_size": 2}, token="netbox-token")
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    assert [obj.external_id for obj in objects] == ["1", "2", "3", "4", "5"]
+    assert seen[0] == "https://netbox.example/api/dcim/interfaces/?limit=2&ordering=id"
+    assert all("ordering=id" in url for url in seen)
+
+
+@pytest.mark.asyncio
+async def test_a_record_deleted_between_pages_shifts_one_record_and_duplicates_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The limitation ``ordering=id`` does not remove, pinned so it stays documented.
+
+    Offset paging cannot tell that the rows before the offset moved. A deletion before
+    the offset -- or an edit that takes a record out of the filter -- shifts one record
+    off the listing. Nothing arrives twice and the family does not fail; the periodic
+    full pass is what reads the shifted record, and the README says exactly this.
+    """
+    table = [{"id": n, "name": f"if{n}"} for n in (1, 2, 3, 4)]
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch, _offset_paged_netbox(table, seen, before_second_page=lambda: table.pop(0))
+    )
+    provider = _provider({"page_size": 2}, token="netbox-token")
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    ids = [obj.external_id for obj in objects]
+    assert len(ids) == len(set(ids))
+    # 1 was read before it went; 3 slid into the offset the first page already covered.
+    assert ids == ["1", "2", "4"]
+
+
+@pytest.mark.asyncio
+async def test_a_callers_own_ordering_is_respected(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+
+    await provider.list_objects(
+        "interface",
+        {"ordering": "name"},
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    assert captured["url"] == "https://netbox.example/api/dcim/interfaces/?ordering=name&limit=100"
+
+
 def test_configured_projection_bindings_use_current_provider_settings() -> None:
     provider = _provider(
         {
@@ -635,7 +751,9 @@ async def test_netbox_list_objects_pushes_the_query_to_netbox(
         context=ProviderCallContext(provider_id="netbox:primary", operation="list_objects"),
     )
 
-    assert seen == ["https://netbox.example/api/ipam/vlans/?site=prg1&status=active&limit=100"]
+    assert seen == [
+        "https://netbox.example/api/ipam/vlans/?site=prg1&status=active&limit=100&ordering=id"
+    ]
 
 
 def test_netbox_provider_url_rejects_an_off_origin_link() -> None:
@@ -684,8 +802,8 @@ async def test_netbox_device_query_narrows_every_device_read(
     await provider.list_objects("device", {"site": "prg1"}, context=context)
 
     assert seen == [
-        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge&limit=100",
-        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge&site=prg1&limit=100",
+        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge&limit=100&ordering=id",
+        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge&site=prg1&limit=100&ordering=id",
     ]
 
 
@@ -744,12 +862,12 @@ async def test_active_saved_scope_maps_a_tenant_and_compiles_typed_family_rules(
     await provider.list_objects("tenant", context=context)
 
     assert seen == [
-        "https://netbox.example/api/dcim/devices/?tenant=tenant-a&status__n=offline&limit=100",
-        "https://netbox.example/api/dcim/sites/?tenant=tenant-a&limit=100",
+        "https://netbox.example/api/dcim/devices/?tenant=tenant-a&status__n=offline&limit=100&ordering=id",
+        "https://netbox.example/api/dcim/sites/?tenant=tenant-a&limit=100&ordering=id",
         # Interfaces carry no tenant themselves. The provider never guesses a relational
         # filter; this family is read only because the scope explicitly exempts it.
-        "https://netbox.example/api/dcim/interfaces/?device_id=7&limit=100",
-        "https://netbox.example/api/tenancy/tenants/?slug=tenant-a&limit=100",
+        "https://netbox.example/api/dcim/interfaces/?device_id=7&limit=100&ordering=id",
+        "https://netbox.example/api/tenancy/tenants/?slug=tenant-a&limit=100&ordering=id",
     ]
 
 
@@ -813,7 +931,7 @@ async def test_saved_scope_is_anded_with_legacy_and_caller_queries(
     )
 
     assert seen == [
-        "https://netbox.example/api/dcim/devices/?tenant=tenant-a&role=router&status=active&site=ams01&limit=100"
+        "https://netbox.example/api/dcim/devices/?tenant=tenant-a&role=router&status=active&site=ams01&limit=100&ordering=id"
     ]
 
 
@@ -1306,7 +1424,7 @@ async def test_netbox_reads_a_family_only_the_instance_knows_about(
         ),
     )
 
-    assert paths == ["/api/plugins/netbox-dns/records/?limit=100"]
+    assert paths == ["/api/plugins/netbox-dns/records/?limit=100&ordering=id"]
     (record,) = objects
     assert (record.object_type, record.external_id, record.name) == (
         "netbox_dns.records",
@@ -1360,7 +1478,9 @@ async def test_discovered_only_family_uses_its_instances_query_schema_for_tenant
         ),
     )
 
-    assert paths == ["https://netbox.example/api/plugins/custom/widgets/?tenant=tenant-a&limit=100"]
+    assert paths == [
+        "https://netbox.example/api/plugins/custom/widgets/?tenant=tenant-a&limit=100&ordering=id"
+    ]
 
 
 @pytest.mark.asyncio

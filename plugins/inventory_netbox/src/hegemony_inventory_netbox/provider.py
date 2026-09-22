@@ -991,10 +991,28 @@ class NetBoxInventoryProvider(InventoryProvider):
         )
 
     def _page_sized(self, path: str) -> str:
-        if any(part.partition("=")[0] == "limit" for part in urlparse(path).query.split("&")):
+        """The first page of ``path``: sized by ``page_size`` and ordered by ``id``.
+
+        NetBox pages by offset and orders by name unless told otherwise, and a name
+        order is stable only for an instant. A record inserted while a listing is in
+        progress lands wherever its name sorts; if that is before the offset already
+        read, every later record shifts by one, the boundary record arrives twice and
+        the platform fails the family on the duplicate. Ordered by ``id`` a concurrent
+        insert can only land on the last page, because NetBox ids only grow. A deletion
+        before the offset -- or an edit that takes a record out of the filter -- still
+        shifts one record off the listing; the periodic full pass is what corrects that,
+        and the README says so. A caller's own ``limit`` or ``ordering`` is respected.
+        """
+        present = {part.partition("=")[0] for part in urlparse(path).query.split("&")}
+        additions = "&".join(
+            f"{key}={value}"
+            for key, value in (("limit", self.config.page_size), ("ordering", "id"))
+            if key not in present
+        )
+        if not additions:
             return path
         separator = "&" if "?" in path else "?"
-        return f"{path}{separator}limit={self.config.page_size}"
+        return f"{path}{separator}{additions}"
 
     async def _iter_paginated(
         self,
