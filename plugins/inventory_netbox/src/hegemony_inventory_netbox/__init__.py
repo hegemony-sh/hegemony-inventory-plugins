@@ -7,6 +7,7 @@
 from typing import Any
 
 from hegemony_inventory_sdk import (
+    SDK_ABI_VERSION,
     Capability,
     InventoryPluginRegistry,
     PlatformServices,
@@ -33,6 +34,11 @@ def register(registry: InventoryPluginRegistry) -> None:
     the only say in what a provider reads: this plugin deliberately keeps no setting of
     its own for the same question.
     """
+    if registry.api_version != SDK_ABI_VERSION:
+        raise RuntimeError(
+            f"NetBox inventory plugin requires SDK ABI {SDK_ABI_VERSION}; "
+            f"platform provides {registry.api_version}"
+        )
     for spec in object_type_specs():
         registry.register_object_type(spec)
     registry.register_provider_type(
@@ -42,7 +48,12 @@ def register(registry: InventoryPluginRegistry) -> None:
             "Read and query devices, sites and any of NetBox's object families -- "
             "IPAM, interfaces, racks, circuits, virtual machines and more"
         ),
-        capabilities=[Capability.READ.value, Capability.QUERY.value],
+        capabilities=[
+            Capability.READ.value,
+            Capability.QUERY.value,
+            Capability.DISCOVER.value,
+            Capability.DELTA.value,
+        ],
         supported_resources=[
             ResourceType.DEVICE.value,
             ResourceType.SITE.value,
@@ -52,7 +63,6 @@ def register(registry: InventoryPluginRegistry) -> None:
         config_model=NetBoxProviderConfig,
         default_config={
             "verify_tls": True,
-            "query_cache_ttl_seconds": None,
             "timeout_seconds": 10.0,
         },
     )

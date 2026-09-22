@@ -7,6 +7,7 @@
 from typing import Any
 
 from hegemony_inventory_sdk import (
+    SDK_ABI_VERSION,
     Capability,
     InventoryPluginRegistry,
     PlatformServices,
@@ -25,6 +26,11 @@ def build_git_provider(
 
 def register(registry: InventoryPluginRegistry) -> None:
     """Entry point for the ``hegemony.inventory_plugins`` group."""
+    if registry.api_version != SDK_ABI_VERSION:
+        raise RuntimeError(
+            f"Git inventory plugin requires SDK ABI {SDK_ABI_VERSION}; "
+            f"platform provides {registry.api_version}"
+        )
     registry.register_provider_type(
         provider_type="git",
         display_name="Git inventory",

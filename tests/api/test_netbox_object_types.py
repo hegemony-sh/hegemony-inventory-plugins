@@ -26,6 +26,7 @@ from hegemony_inventory_netbox import (
     register,
 )
 from hegemony_inventory_netbox.config import NetBoxProviderConfig
+from hegemony_inventory_netbox.overlay import EXTERNAL_ID_KEYS
 from hegemony_inventory_netbox.provider import NetBoxInventoryProvider
 from hegemony_inventory_sdk import (
     InventoryProviderError,
@@ -40,7 +41,10 @@ from tests.inventory_fakes import FakePlatformServices
 
 _CORE_RESOURCES = {ResourceType.DEVICE.value, ResourceType.SITE.value}
 _ENDPOINT = re.compile(r"^/api/[a-z][a-z0-9-]*/[a-z][a-z0-9-]*/$")
-_OBJECT_TYPE_ID = re.compile(r"^[a-z][a-z0-9_]*$")
+#: An object-type id is either a bare singular -- the fifty this plugin promised before
+#: the deriver existed and must keep offering -- or ``app.family``, which the deriver
+#: reads straight off the endpoint and so can produce for a family nobody wrote down.
+_OBJECT_TYPE_ID = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)?$")
 
 
 def _provider(config: dict[str, Any] | None = None) -> NetBoxInventoryProvider:
@@ -120,11 +124,23 @@ class _RecordingRegistry:
 def test_every_catalogue_entry_is_well_formed(entry: catalogue.NetBoxObjectType) -> None:
     """One entry, checked the way a reader would check it before trusting it."""
     assert _OBJECT_TYPE_ID.match(entry.id), entry.id
-    assert entry.id not in _CORE_RESOURCES, "devices and sites have their own contract"
+    if entry.id in _CORE_RESOURCES:
+        # Devices and sites are families like any other now, and that is only safe
+        # because they carry a projection binding: it is what says the stored rows
+        # become the platform's devices and sites tables rather than a second, parallel
+        # copy of them under a generic object type.
+        assert entry.binding is not None, (
+            f"{entry.id} is in the catalogue without a binding, so its rows would be "
+            "stored as generic objects and never reach the table they belong in"
+        )
     assert _ENDPOINT.match(entry.endpoint), entry.endpoint
-    # Every NetBox object has a numeric primary key, and it is what related objects
-    # cite, so it is the only identity that works for every family.
-    assert entry.identity == "id"
+    # A family is stored under one key and cited by the same one. NetBox's numeric
+    # primary key is what every family has and what every reference carries, so it is
+    # the default; a family that overrides it must say so in the overlay, and both
+    # spellings then come from there. Storing a row under one key while every edge into
+    # it cites another is the shape of the defect all of this exists to remove.
+    assert entry.identity == EXTERNAL_ID_KEYS.get(entry.endpoint, "id"), entry.id
+    assert entry.identity_keys == (entry.identity,)
     assert entry.display_name and entry.plural and entry.description
     assert entry.attributes, "a family with no attributes stores nothing worth listing"
 
@@ -157,6 +173,31 @@ def test_catalogue_ids_are_unique() -> None:
     ids = [entry.id for entry in catalogue.OBJECT_TYPES]
     assert len(ids) == len(set(ids)), "duplicate ids would collide in the platform registry"
     assert tuple(sorted(ids)) == catalogue.ALL_OBJECT_TYPE_IDS
+
+
+def test_core_family_catalogue_bindings_keep_projection_metadata() -> None:
+    """The generated seed keeps every binding field declared by the overlay."""
+    device = catalogue.BY_ID["device"].binding
+    assert device is not None
+    assert device.device_hostname == "name"
+    assert device.hostname_fallbacks == ("primary_ip6",)
+    assert device.display_name == "display"
+    assert device.native_tags == "tags"
+    assert device.descriptive == {
+        "asset_tag": "asset_tag",
+        "rack": "rack",
+        "position": "position",
+        "tenant": "tenant",
+        "location": "location",
+        "mgmt_host_v6": "primary_ip6",
+    }
+    assert device.transforms == {"hostname": ("host",)}
+
+    site = catalogue.BY_ID["site"].binding
+    assert site is not None
+    assert site.location == "physical_address"
+    assert site.tags == {"region": "region_slug", "group": "group_slug"}
+    assert site.descriptive == {"slug": "slug", "description": "description"}
 
 
 def test_every_family_is_grouped_under_its_netbox_app() -> None:
@@ -234,7 +275,7 @@ async def test_a_family_the_catalogue_does_not_know_is_not_served(
     assert "not supported" in excinfo.value.envelope.message
     with pytest.raises(InventoryProviderError):
         await provider.get_object("unicorn", "1", context=_context("get_object:unicorn"))
-    assert requested == [], "an uncatalogued family must not reach NetBox at all"
+    assert requested == [], "an uncataloged family must not reach NetBox at all"
 
 
 _INTERFACE_PAYLOAD = {
@@ -276,7 +317,11 @@ async def test_list_objects_maps_a_catalogue_family_with_its_edges(
     assert interface.object_type == "interface"
     assert interface.external_id == "41"
     assert interface.name == "ge-0/0/1"
-    assert interface.attributes == {
+    # The mapper emits exactly what the family declares -- no more, so a record cannot
+    # smuggle a field past the catalogue, and no fewer, so a path this record does not
+    # carry is stored as null rather than quietly missing.
+    assert set(interface.attributes) == set(catalogue.BY_ID["interface"].attributes)
+    expected = {
         "name": "ge-0/0/1",
         "device": "ams01-core-01",
         "type": "1000base-t",
@@ -287,9 +332,8 @@ async def test_list_objects_maps_a_catalogue_family_with_its_edges(
         "mode": "tagged",
         "lag": "ae0",
         "untagged_vlan": 100,
-        "mark_connected": False,
-        "description": "uplink",
     }
+    assert {name: interface.attributes[name] for name in expected} == expected
     # Edges cite the same external ids the related rows are keyed on, so an interface
     # points at the device row a device sync created.
     assert {
@@ -329,9 +373,9 @@ async def test_a_configured_query_scopes_a_family_and_a_caller_query_narrows_it(
     await provider.list_objects("ip_prefix", context=_context("list_objects:ip_prefix"))
 
     assert urls == [
-        "https://netbox.example/api/dcim/interfaces/?mgmt_only=false",
-        "https://netbox.example/api/dcim/interfaces/?mgmt_only=false&device_id=7",
-        "https://netbox.example/api/ipam/prefixes/?status=active",
+        "https://netbox.example/api/dcim/interfaces/?mgmt_only=false&limit=100&ordering=id",
+        "https://netbox.example/api/dcim/interfaces/?mgmt_only=false&device_id=7&limit=100&ordering=id",
+        "https://netbox.example/api/ipam/prefixes/?status=active&limit=100&ordering=id",
     ]
 
 
@@ -390,8 +434,8 @@ async def test_get_object_cannot_escape_the_family_scope(
 
     # Both reads went to the filtered list endpoint, never to /interfaces/<id>/.
     assert urls == [
-        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=41",
-        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=99",
+        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=41&limit=100&ordering=id",
+        "https://netbox.example/api/dcim/interfaces/?device_id=7&id=99&limit=100&ordering=id",
     ]
 
 
@@ -466,6 +510,100 @@ def test_the_generic_scopes_netbox_moved_to_are_mapped(
     assert all(
         relationship.rel not in {"scope", "termination", "parent"}
         for relationship in descriptor.relationships
+    )
+
+
+#: Every field NetBox replaced with a generic one, as (family, legacy, generic).
+#: A given server serves exactly one of each pair, which is why both are mapped --
+#: and why naming the wrong one in a column or a search list is a silent defect
+#: rather than an error. The table is checked against the catalogue below, so it
+#: cannot drift away from what is actually mapped.
+_VERSION_REPLACED_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("ip_prefix", "site", "scope"),
+    ("cluster", "site", "scope"),
+    ("circuit_termination", "site", "termination"),
+    ("circuit_termination", "provider_network", "termination"),
+    ("service", "device", "parent"),
+    ("service", "virtual_machine", "parent"),
+    ("contact", "group", "groups"),
+    ("interface", "mac_address", "primary_mac_address"),
+    ("vm_interface", "mac_address", "primary_mac_address"),
+)
+
+
+@pytest.mark.parametrize(("family", "legacy", "generic"), _VERSION_REPLACED_FIELDS)
+def test_both_spellings_of_a_replaced_field_are_mapped(
+    family: str, legacy: str, generic: str
+) -> None:
+    """Keeps the table above honest: a pair nothing maps would make the two tests vacuous."""
+    attributes = catalogue.BY_ID[family].attributes
+    assert legacy in attributes, f"{family}: {legacy} is not mapped"
+    assert generic in attributes, f"{family}: {generic} is not mapped"
+
+
+@pytest.mark.parametrize(("family", "legacy", "generic"), _VERSION_REPLACED_FIELDS)
+def test_a_browse_column_never_names_the_spelling_a_current_netbox_dropped(
+    family: str, legacy: str, generic: str
+) -> None:
+    """Columns take the generic spelling, so no operator gets a permanently empty one.
+
+    This is the README's stated policy. ``ip_prefix`` broke it and shipped a blank
+    Site column on every NetBox 4.2 and later, where a prefix carries ``scope``.
+    """
+    entry = catalogue.BY_ID[family]
+    assert legacy not in entry.columns, (
+        f"{family}: column {legacy!r} is absent on a supported NetBox; "
+        f"use {generic!r}, which is what such a server serves"
+    )
+
+
+#: The families that surface a replaced field in their browse table, and the spelling
+#: that has to appear there. Declared as intent rather than derived from the catalogue:
+#: a derived set moves with the column it describes, so it could never catch the column
+#: being deleted -- which is the regression this guards. Families whose replaced pair is
+#: not a column at all are deliberately absent (a contact's `groups` and the two MAC
+#: fields are searchable, never columns), so they are not forced to become one.
+_REPLACED_FIELD_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("ip_prefix", "scope"),
+    ("cluster", "scope"),
+    ("circuit_termination", "termination"),
+    ("service", "parent"),
+)
+
+
+@pytest.mark.parametrize(("family", "generic"), _REPLACED_FIELD_COLUMNS)
+def test_a_family_that_browses_a_replaced_field_shows_the_generic_spelling(
+    family: str, generic: str
+) -> None:
+    """The other half of the column rule: the right spelling is present, not just absent.
+
+    Rejecting the legacy spelling alone would still pass if the column were dropped
+    altogether, leaving the browse table with no scope at all rather than a wrong one.
+    """
+    entry = catalogue.BY_ID[family]
+    assert generic in entry.columns, (
+        f"{family}: browse columns no longer show {generic!r}, so the value a supported "
+        f"NetBox serves is not in the table at all"
+    )
+
+
+@pytest.mark.parametrize(("family", "legacy", "generic"), _VERSION_REPLACED_FIELDS)
+def test_a_searchable_field_stays_searchable_across_the_version_split(
+    family: str, legacy: str, generic: str
+) -> None:
+    """Search lists both spellings, unlike columns.
+
+    A search field costs no screen space, so listing both makes the value findable on
+    either side of the rename; one alone leaves it unfindable on the other. Interface
+    and VM interface listed only ``mac_address``, so searching by MAC matched nothing
+    on a NetBox that serves ``primary_mac_address``.
+    """
+    entry = catalogue.BY_ID[family]
+    if legacy not in entry.search_fields and generic not in entry.search_fields:
+        pytest.skip(f"{family} does not offer {legacy}/{generic} for search")
+    assert legacy in entry.search_fields and generic in entry.search_fields, (
+        f"{family}: search offers only one of {legacy!r}/{generic!r}, so the value is "
+        f"unfindable on the NetBox releases that serve the other"
     )
 
 
@@ -550,10 +688,9 @@ def test_the_config_rejects_families_nothing_serves_and_forgets_the_retired_sett
     base = {"url": "https://netbox.example", "token_ref": "vault://netbox/token"}
 
     with pytest.raises(ValidationError) as query_error:
-        NetBoxProviderConfig.model_validate({**base, "object_queries": {"nope": "x=1"}})
+        NetBoxProviderConfig.model_validate({**base, "object_queries": {"Not Valid!": "x=1"}})
     message = str(query_error.value)
-    assert "nope" in message  # the typo is named...
-    assert "interface" in message  # ...and the valid ids are listed
+    assert "Not Valid!" in message
 
     # A config written while this plugin still had its own object-type setting must
     # keep validating: extra="forbid" would otherwise reject it outright.
@@ -569,3 +706,57 @@ def test_the_config_rejects_families_nothing_serves_and_forgets_the_retired_sett
     # An unknown key that was never ours is still an error.
     with pytest.raises(ValidationError):
         NetBoxProviderConfig.model_validate({**base, "nonsense": 1})
+
+
+def test_saved_scope_names_are_unique_and_the_active_name_must_exist() -> None:
+    base = {"url": "https://netbox.example", "token_ref": "vault://netbox/token"}
+    scope = {
+        "name": "Tenant A",
+        "tenant_slug": "tenant-a",
+        "queries": {"device": [{"field": "status", "lookup": "exact", "value": "active"}]},
+        "tenant_scope_exemptions": ["interface", "interface"],
+    }
+
+    config = NetBoxProviderConfig.model_validate(
+        {
+            **base,
+            "inventory_scopes": [scope],
+            "active_inventory_scope": "Tenant A",
+        }
+    )
+    active = config.inventory_filter
+    assert active is not None
+    assert active.tenant_slug == "tenant-a"
+    assert active.tenant_scope_exemptions == ["interface"]
+
+    with pytest.raises(ValidationError, match="must be unique"):
+        NetBoxProviderConfig.model_validate(
+            {
+                **base,
+                "inventory_scopes": [scope, scope],
+                "active_inventory_scope": "Tenant A",
+            }
+        )
+    with pytest.raises(ValidationError, match="must name one"):
+        NetBoxProviderConfig.model_validate(
+            {
+                **base,
+                "inventory_scopes": [scope],
+                "active_inventory_scope": "Tenant B",
+            }
+        )
+    with pytest.raises(ValidationError, match="required"):
+        NetBoxProviderConfig.model_validate(
+            {
+                **base,
+                "inventory_scopes": [
+                    {
+                        "name": "Bad",
+                        "queries": {
+                            "device": [{"field": "status", "lookup": "exact", "value": " "}]
+                        },
+                    }
+                ],
+                "active_inventory_scope": "Bad",
+            }
+        )

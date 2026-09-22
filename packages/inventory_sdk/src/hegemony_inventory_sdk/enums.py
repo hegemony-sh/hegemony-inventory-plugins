@@ -21,6 +21,21 @@ class Capability(str, Enum):
     QUERY = "query"
     WRITE = "write"
     WEBHOOK = "webhook"
+    #: The provider can describe the instance it is configured against, rather than only
+    #: the object types its plugin was written to know about. A source of truth that can
+    #: be extended -- NetBox with plugins installed, custom fields defined -- serves
+    #: object types no shipped catalogue could have anticipated, and only the instance
+    #: can say what they are.
+    DISCOVER = "discover"
+    #: The provider can answer "what changed since X" rather than only "what is there".
+    #:
+    #: Declaring it is a promise about two things at once. The provider honours
+    #: ``ProviderCallContext.since`` by returning every record that changed at or after
+    #: it -- a record missed is a record the platform will not look at again until the
+    #: next full pass -- and it stamps each descriptor's ``source_version`` with a marker
+    #: the platform can carry back. A provider that does one without the other is worse
+    #: than one that does neither, because the platform would believe it was up to date.
+    DELTA = "delta"
 
 
 class ResourceType(str, Enum):

@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_DIRS = (
     ROOT / "packages" / "inventory_sdk",
     ROOT / "plugins" / "inventory_netbox",
-    ROOT / "plugins" / "inventory_infrahub",
     ROOT / "plugins" / "inventory_git",
 )
 

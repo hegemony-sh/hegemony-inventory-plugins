@@ -9,7 +9,6 @@ Standalone release repo for Hegemony inventory plugin packages:
 
 - `hegemony-inventory-sdk`
 - `hegemony-inventory-netbox`
-- `hegemony-inventory-infrahub`
 - `hegemony-inventory-git`
 
 The SDK and all provider wheels are released together from unified semver tags such as
@@ -49,7 +48,6 @@ cd \"\${tmp}\"
 curl -fsSLO \"\${base}/SHA256SUMS\"
 for wheel in \
   hegemony_inventory_netbox-\${version}-py3-none-any.whl \
-  hegemony_inventory_infrahub-\${version}-py3-none-any.whl \
   hegemony_inventory_git-\${version}-py3-none-any.whl
 do
   curl -fsSLO \"\${base}/\${wheel}\"
@@ -84,7 +82,6 @@ docker exec -u root -it "${API_CONTAINER}" bash -lc '
 uv pip install --python /opt/venv/bin/python --no-deps \
   /tmp/inventory-wheels/hegemony_inventory_sdk-*.whl \
   /tmp/inventory-wheels/hegemony_inventory_netbox-*.whl \
-  /tmp/inventory-wheels/hegemony_inventory_infrahub-*.whl \
   /tmp/inventory-wheels/hegemony_inventory_git-*.whl
 '
 docker restart "${API_CONTAINER}"
@@ -134,7 +131,7 @@ task version:set -- 0.1.0
 task lock
 ```
 
-Tags must match package metadata. A `v0.1.0` tag publishes four wheels plus
+Tags must match package metadata. A `v0.1.0` tag publishes three wheels plus
 `SHA256SUMS` to the matching GitHub Release.
 
 Releases are intended to be immutable: the release workflow fails if a GitHub

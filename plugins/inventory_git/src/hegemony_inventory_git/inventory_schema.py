@@ -104,8 +104,7 @@ class GitInventoryDeviceV1(BaseModel):
     mgmt_port: int | None = Field(None, ge=1, le=65535)
     # Optional: omit to let the core inventory service apply its default platform.
     platform: str | None = None
-    vendor: str | None = None
-    model: str | None = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
     site: str | None = None
     role: str | None = None
     tags: list[str] = Field(default_factory=list)

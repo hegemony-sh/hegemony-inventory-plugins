@@ -6,21 +6,26 @@
 
 from __future__ import annotations
 
+import json
+import pathlib
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 import pytest
 
-from hegemony_inventory_netbox import provider as netbox_provider_module
+from hegemony_inventory_netbox import object_types as catalogue, provider as netbox_provider_module
 from hegemony_inventory_netbox.config import NetBoxProviderConfig
+from hegemony_inventory_netbox.object_types import BY_ID
 from hegemony_inventory_netbox.provider import NetBoxInventoryProvider
 from hegemony_inventory_sdk import (
+    Capability,
+    InventoryLimits,
     InventoryProviderError,
-    MaintenanceState,
+    ObjectFieldMapping,
     ProviderCallContext,
     ProviderErrorCode,
     ResourceType,
-    SiteRef,
 )
 from tests.inventory_fakes import FakePlatformServices
 
@@ -87,12 +92,12 @@ async def test_netbox_authorization_header_is_configurable_without_duplicate_pre
     _install_transport(monkeypatch, httpx.MockTransport(handler))
 
     provider = _provider(config, token=resolved_token)
-    await provider.query_devices(
-        "",
+    await provider.list_objects(
+        "interface",
         limit=10,
         context=ProviderCallContext(
             provider_id="netbox:primary",
-            operation="query_devices",
+            operation="auth-test",
             query_hash="auth-test",
             config_version=1,
         ),
@@ -117,12 +122,12 @@ async def test_netbox_unprefixed_token_retries_token_after_bearer_auth_failure(
     _install_transport(monkeypatch, httpx.MockTransport(handler))
 
     provider = _provider(token="netbox-token")
-    await provider.query_devices(
-        "",
+    await provider.list_objects(
+        "interface",
         limit=10,
         context=ProviderCallContext(
             provider_id="netbox:primary",
-            operation="query_devices",
+            operation="read_objects",
             query_hash="auth-fallback-test",
             config_version=1,
         ),
@@ -142,12 +147,13 @@ async def test_netbox_client_400_returns_safe_malformed_query_error(
 
     provider = _provider(token="netbox-token")
     with pytest.raises(InventoryProviderError) as exc_info:
-        await provider.query_devices(
-            "bad=query",
+        await provider.list_objects(
+            "interface",
+            {"bad": "query"},
             limit=10,
             context=ProviderCallContext(
                 provider_id="netbox:primary",
-                operation="query_devices",
+                operation="read_objects",
                 query_hash="bad-query",
                 config_version=1,
             ),
@@ -188,12 +194,12 @@ async def test_netbox_transient_failures_retry_four_times_with_one_client(
     monkeypatch.setattr(netbox_provider_module.asyncio, "sleep", no_sleep)
 
     provider = _provider(token="netbox-token")
-    await provider.query_devices(
-        "",
+    await provider.list_objects(
+        "interface",
         limit=10,
         context=ProviderCallContext(
             provider_id="netbox:primary",
-            operation="query_devices",
+            operation="read_objects",
             query_hash="retry-test",
             config_version=1,
         ),
@@ -220,12 +226,12 @@ async def test_netbox_rejects_off_origin_pagination_before_sending_token(
 
     provider = _provider(token="netbox-token")
     with pytest.raises(InventoryProviderError) as exc_info:
-        await provider.query_devices(
-            "",
+        await provider.list_objects(
+            "interface",
             limit=10,
             context=ProviderCallContext(
                 provider_id="netbox:primary",
-                operation="query_devices",
+                operation="read_objects",
                 query_hash="pagination-origin-test",
                 config_version=1,
             ),
@@ -235,21 +241,214 @@ async def test_netbox_rejects_off_origin_pagination_before_sending_token(
     assert captured == [("netbox.example", "Bearer netbox-token")]
 
 
-def test_netbox_mapping_does_not_stringify_none_values() -> None:
-    provider = _provider()
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"results": [None], "next": None},
+        {"results": [], "next": 42},
+    ],
+)
+async def test_netbox_rejects_malformed_pagination_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, Any],
+) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
 
-    descriptor = provider._map_device(
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+    with pytest.raises(InventoryProviderError) as exc_info:
+        await provider.list_objects(
+            "interface",
+            limit=10,
+            context=ProviderCallContext(
+                provider_id="netbox:primary",
+                operation="read_objects",
+            ),
+        )
+
+    assert exc_info.value.envelope.code == ProviderErrorCode.PAGINATION_FAILED
+    assert exc_info.value.envelope.safe_details["page"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_listing_is_not_truncated_by_the_run_target_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_pages: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_pages.append(
+            request.url.path + ("?" + request.url.query.decode() if request.url.query else "")
+        )
+        if request.url.params.get("page") == "2":
+            return httpx.Response(
+                200,
+                json={"results": [{"id": 2, "name": "eth1"}], "next": None},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "results": [{"id": 1, "name": "eth0"}],
+                "next": "https://netbox.example/api/dcim/interfaces/?page=2",
+            },
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+    provider._services.limits = InventoryLimits(
+        max_provider_pages=10,
+        max_run_targets=1,
+        max_preview_devices=1,
+    )
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    assert [obj.external_id for obj in objects] == ["1", "2"]
+    assert len(requested_pages) == 2
+
+
+def _offset_paged_netbox(
+    table: list[dict[str, Any]],
+    seen: list[str],
+    *,
+    before_second_page: Callable[[], object] | None = None,
+) -> httpx.MockTransport:
+    """A NetBox that pages by limit/offset over a live table, honouring ``ordering``.
+
+    The table is read afresh on every request, so ``before_second_page`` can change it
+    between the first page and the second the way a concurrent editor would.
+    """
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        seen.append(str(request.url))
+        if calls == 2 and before_second_page is not None:
+            before_second_page()
+        params = request.url.params
+        limit = int(params.get("limit", "50"))
+        offset = int(params.get("offset", "0"))
+        ordering = params.get("ordering", "name")
+        rows = sorted(table, key=lambda row: row[ordering])
+        next_url = (
+            str(request.url.copy_set_param("offset", str(offset + limit)))
+            if offset + limit < len(rows)
+            else None
+        )
+        return httpx.Response(
+            200, json={"results": rows[offset : offset + limit], "next": next_url}
+        )
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_a_record_inserted_between_pages_lands_on_the_last_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordered by ``id``, a concurrent insert cannot shift the pages already read.
+
+    Under NetBox's default name ordering the newcomer sorts wherever its name falls.
+    Before the offset already read, it pushes every later record along by one: the
+    boundary record arrives twice and the platform fails the family on the duplicate.
+    NetBox ids only grow, so ordered by id the newcomer can only be last.
+    """
+    table = [{"id": n, "name": name} for n, name in ((1, "b"), (2, "c"), (3, "d"), (4, "e"))]
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _offset_paged_netbox(
+            table, seen, before_second_page=lambda: table.append({"id": 5, "name": "a"})
+        ),
+    )
+    provider = _provider({"page_size": 2}, token="netbox-token")
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    assert [obj.external_id for obj in objects] == ["1", "2", "3", "4", "5"]
+    assert seen[0] == "https://netbox.example/api/dcim/interfaces/?limit=2&ordering=id"
+    assert all("ordering=id" in url for url in seen)
+
+
+@pytest.mark.asyncio
+async def test_a_record_deleted_between_pages_shifts_one_record_and_duplicates_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The limitation ``ordering=id`` does not remove, pinned so it stays documented.
+
+    Offset paging cannot tell that the rows before the offset moved. A deletion before
+    the offset -- or an edit that takes a record out of the filter -- shifts one record
+    off the listing. Nothing arrives twice and the family does not fail; the periodic
+    full pass is what reads the shifted record, and the README says exactly this.
+    """
+    table = [{"id": n, "name": f"if{n}"} for n in (1, 2, 3, 4)]
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch, _offset_paged_netbox(table, seen, before_second_page=lambda: table.pop(0))
+    )
+    provider = _provider({"page_size": 2}, token="netbox-token")
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    ids = [obj.external_id for obj in objects]
+    assert len(ids) == len(set(ids))
+    # 1 was read before it went; 3 slid into the offset the first page already covered.
+    assert ids == ["1", "2", "4"]
+
+
+@pytest.mark.asyncio
+async def test_a_callers_own_ordering_is_respected(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+
+    await provider.list_objects(
+        "interface",
+        {"ordering": "name"},
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    assert captured["url"] == "https://netbox.example/api/dcim/interfaces/?ordering=name&limit=100"
+
+
+def test_configured_projection_bindings_use_current_provider_settings() -> None:
+    provider = _provider(
         {
-            "id": 123,
-            "name": "router-no-platform",
-            "primary_ip4": {"address": "192.0.2.10/32"},
-            "platform": {"slug": None},
-            "device_type": {"model": None},
+            "site_tree_source": "site_group",
+            "status_map": {"planned": "maintenance"},
+            "tag_key_prefix": "nb:",
         }
     )
 
-    assert descriptor.platform is None
-    assert descriptor.model is None
+    bindings = {
+        binding.object_type: binding
+        for binding in provider.configured_projection_bindings(
+            {"device", "site", "region", "site_group"}
+        )
+    }
+
+    assert set(bindings) == {"device", "site", "site_group"}
+    assert bindings["site"].parent_edge == "group"
+    assert bindings["device"].maintenance_state_map == {"*": "active", "planned": "maintenance"}
+    assert bindings["device"].tag_prefix == "nb:"
 
 
 def test_netbox_config_normalizes_field_map_entries() -> None:
@@ -266,75 +465,7 @@ def test_netbox_config_normalizes_field_map_entries() -> None:
     )
 
     assert config.field_map == {
-        "platform": "platform.slug",
         "access_config.ssh.username_ref": "custom_fields.hegemony_ssh_username_ref",
-    }
-
-
-def test_netbox_mapping_uses_generic_field_map_and_default_access_config() -> None:
-    provider = _provider(
-        {
-            "field_map": {
-                "external_id": "id",
-                "name": "name",
-                "display_name": "display",
-                "hostname": "hostname",
-                "mgmt_host": "primary_ip.address",
-                "platform": "platform.slug",
-                "model": "device_type.model",
-                "site.external_id": "site.slug",
-                "site.name": "site.name",
-                "role": "device_role.slug",
-                "tags": "tags",
-                "access_config.ssh.username_ref": "custom_fields.net_ssh_user",
-                "access_config.ssh.password_ref": "custom_fields.net_ssh_password",
-            },
-            "default_access_config": {
-                "ssh": {"private_key_ref": "{{ secret('vault://shared/netbox/key') }}"},
-                "enable": {"password_ref": "{{ secret('vault://shared/netbox/enable') }}"},
-            },
-        }
-    )
-
-    descriptor = provider._map_device(
-        {
-            "id": 123,
-            "name": "router-1",
-            "display": "Router 1",
-            "hostname": "router-1.example",
-            "primary_ip": {"address": "192.0.2.10/32"},
-            "platform": {"slug": "junos"},
-            "device_type": {"model": "MX204"},
-            "site": {"slug": "prg1", "name": "Prague 1"},
-            "device_role": {"slug": "edge"},
-            "tags": [{"slug": "wan"}, {"name": "core"}],
-            "custom_fields": {
-                "net_ssh_user": "{{ secret('vault://devices/router-1/user') }}",
-                "net_ssh_password": "{{ secret('vault://devices/router-1/password') }}",
-            },
-        }
-    )
-
-    assert descriptor.external_id == "123"
-    assert descriptor.display_name == "Router 1"
-    assert descriptor.hostname == "router-1.example"
-    assert descriptor.mgmt_host == "192.0.2.10"
-    assert descriptor.platform == "junos"
-    assert descriptor.model == "MX204"
-    assert descriptor.role == "edge"
-    assert descriptor.site is not None
-    assert descriptor.site.external_id == "prg1"
-    assert descriptor.site.name == "Prague 1"
-    assert descriptor.native_tags == ("wan", "core")
-    assert descriptor.access_config == {
-        "ssh": {
-            "username_ref": "{{ secret('vault://devices/router-1/user') }}",
-            "password_ref": "{{ secret('vault://devices/router-1/password') }}",
-            "private_key_ref": "{{ secret('vault://shared/netbox/key') }}",
-        },
-        "enable": {
-            "password_ref": "{{ secret('vault://shared/netbox/enable') }}",
-        },
     }
 
 
@@ -396,11 +527,14 @@ async def test_netbox_list_objects_maps_ip_prefixes(monkeypatch: pytest.MonkeyPa
     assert [o.object_type for o in objects] == ["ip_prefix", "ip_prefix"]
     assert [o.external_id for o in objects] == ["1", "2"]
     assert [o.name for o in objects] == ["10.0.0.0/24", "10.0.1.0/24"]
-    assert objects[0].attributes == {
+    assert set(objects[0].attributes) == set(BY_ID["ip_prefix"].attributes)
+    expected = {
         "prefix": "10.0.0.0/24",
         "status": "active",
         "vlan": 10,
         "role": "lan",
+        # NetBox 4.2 replaced Prefix.site with a generic scope. Both spellings are
+        # mapped, so a record from either release resolves and the other reads null.
         "site": "ams01",
         "scope": None,
         "scope_type": None,
@@ -409,6 +543,7 @@ async def test_netbox_list_objects_maps_ip_prefixes(monkeypatch: pytest.MonkeyPa
         "is_pool": False,
         "description": "core",
     }
+    assert {name: objects[0].attributes[name] for name in expected} == expected
     # Absent nested values map to None rather than raising or being stringified.
     assert objects[1].attributes["vlan"] is None
     assert objects[1].attributes["site"] is None
@@ -470,6 +605,21 @@ async def test_netbox_list_objects_maps_the_prefix_scope_on_netbox_4_2_and_later
     assert attributes["tenant"] == "meridian-internal"
 
 
+#: The dotted paths a VLAN record resolves through, and what they should yield. A
+#: rendered choice through ``status.value``, three references each read by a different
+#: natural key, and one reference the record does not carry at all.
+_EXPECTED_VLAN = {
+    "vid": 100,
+    "name": "prod-web",
+    "status": "active",
+    "site": "ams01",
+    "group": "campus",
+    "role": "server",
+    "tenant": None,
+    "description": "web tier",
+}
+
+
 @pytest.mark.asyncio
 async def test_netbox_list_objects_maps_vlans(monkeypatch: pytest.MonkeyPatch) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -509,82 +659,11 @@ async def test_netbox_list_objects_maps_vlans(monkeypatch: pytest.MonkeyPatch) -
     assert len(objects) == 1
     vlan = objects[0]
     assert (vlan.object_type, vlan.external_id, vlan.name) == ("vlan", "7", "prod-web")
-    assert vlan.attributes == {
-        "vid": 100,
-        "name": "prod-web",
-        "status": "active",
-        "site": "ams01",
-        "group": "campus",
-        "role": "server",
-        "tenant": None,
-        "description": "web tier",
-    }
-
-
-def test_netbox_merges_default_jump_host_onto_every_device() -> None:
-    """A fleet-wide bastion in default_access_config reaches every device.
-
-    Unlike the git provider — whose per-device YAML can name its own hop —
-    NetBox exposes only the provider-level default: the mappable
-    access_config paths are fixed by DEFAULT_FIELD_MAP, which carries the
-    ssh/enable credential refs and no jump_host entry. This pins that
-    boundary along with the merge itself.
-    """
-    provider = _provider(
-        {
-            "field_map": {
-                "external_id": "id",
-                "name": "name",
-                "mgmt_host": "primary_ip.address",
-                "access_config.ssh.username_ref": "custom_fields.net_ssh_user",
-            },
-            "default_access_config": {
-                "ssh": {"private_key_ref": "{{ secret('vault://shared/netbox/key') }}"},
-                "jump_host": {
-                    "host": "dind",
-                    "port": 2222,
-                    "username_ref": "{{ secret('vault://lab/bastion/username') }}",
-                    "password_ref": "{{ secret('vault://lab/bastion/password') }}",
-                },
-            },
-        }
-    )
-
-    descriptor = provider._map_device(
-        {
-            "id": 1,
-            "name": "r1",
-            "primary_ip": {"address": "192.0.2.10/32"},
-            "custom_fields": {"net_ssh_user": "{{ secret('vault://devices/r1/user') }}"},
-        }
-    )
-
-    assert descriptor.access_config["jump_host"] == {
-        "host": "dind",
-        "port": 2222,
-        "username_ref": "{{ secret('vault://lab/bastion/username') }}",
-        "password_ref": "{{ secret('vault://lab/bastion/password') }}",
-    }
-    # The scope is additive: mapped and defaulted ssh refs still merge.
-    assert descriptor.access_config["ssh"] == {
-        "username_ref": "{{ secret('vault://devices/r1/user') }}",
-        "private_key_ref": "{{ secret('vault://shared/netbox/key') }}",
-    }
-
-
-def test_netbox_without_default_jump_host_emits_no_jump_host_scope() -> None:
-    # An empty scope must not appear at all: a jump_host block with no host
-    # would make the platform attempt a bastion hop to nowhere.
-    provider = _provider(
-        {
-            "field_map": {"external_id": "id", "name": "name", "mgmt_host": "primary_ip.address"},
-            "default_access_config": {"ssh": {"username_ref": "{{ secret('vault://a/b') }}"}},
-        }
-    )
-    descriptor = provider._map_device(
-        {"id": 1, "name": "r1", "primary_ip": {"address": "192.0.2.10/32"}, "custom_fields": {}}
-    )
-    assert "jump_host" not in descriptor.access_config
+    # The mapper emits exactly the attributes the family declares -- no more, so a
+    # record cannot smuggle a field past the catalogue, and no fewer, so a path the
+    # record does not carry is stored as null rather than silently dropped.
+    assert set(vlan.attributes) == set(BY_ID["vlan"].attributes)
+    assert {name: vlan.attributes[name] for name in _EXPECTED_VLAN} == _EXPECTED_VLAN
 
 
 def _json_transport(
@@ -601,69 +680,6 @@ def _json_transport(
         return httpx.Response(200, json=payload)
 
     return httpx.MockTransport(handler)
-
-
-@pytest.mark.asyncio
-async def test_netbox_site_external_id_matches_between_site_list_and_device_mapping(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A site keys identically whether it arrives via /sites/ or nested in a device.
-
-    The two paths used to disagree — ``_map_site`` emitted the numeric NetBox id
-    while the device field map emitted ``site.slug`` — so the platform, which keys
-    sites on ``(provider_id, external_id)``, materialized every NetBox site twice
-    and attached devices to the copy carrying no parent link.
-    """
-    provider = _provider(token="netbox-token")
-    site_payload = {"id": 7, "slug": "prg1", "name": "Prague 1", "physical_address": "Praha"}
-    _install_transport(
-        monkeypatch,
-        _json_transport({"/api/dcim/sites/": {"results": [site_payload], "next": None}}),
-    )
-
-    listed = await provider.list_sites(
-        context=ProviderCallContext(provider_id="netbox:primary", operation="list_sites")
-    )
-    nested = provider._map_device(
-        {"id": 1, "name": "router-1", "site": {"id": 7, "slug": "prg1", "name": "Prague 1"}}
-    )
-
-    assert [site.external_id for site in listed] == ["prg1"]
-    assert nested.site is not None
-    assert nested.site.external_id == listed[0].external_id
-
-
-def test_netbox_site_parent_is_keyed_like_its_children() -> None:
-    """A parent reference uses the same key as the sites it parents.
-
-    Emitting a numeric parent id against slug-keyed children left every parent
-    link dangling, which is what disconnected the NetBox site hierarchy.
-    """
-    provider = _provider()
-
-    site = provider._map_site(
-        {
-            "id": 7,
-            "slug": "prg1",
-            "name": "Prague 1",
-            "parent": {"id": 3, "slug": "cz", "name": "Czechia"},
-        }
-    )
-
-    assert site.external_id == "prg1"
-    assert site.parent_external_id == "cz"
-
-
-def test_netbox_site_key_follows_the_configured_field_map() -> None:
-    """Remapping ``site.external_id`` moves both mapping paths together."""
-    provider = _provider({"field_map": {"site.external_id": "site.id"}})
-
-    site = provider._map_site({"id": 7, "slug": "prg1", "name": "Prague 1"})
-    device = provider._map_device({"id": 1, "name": "r1", "site": {"id": 7, "slug": "prg1"}})
-
-    assert site.external_id == "7"
-    assert device.site is not None
-    assert device.site.external_id == "7"
 
 
 @pytest.mark.asyncio
@@ -735,157 +751,35 @@ async def test_netbox_list_objects_pushes_the_query_to_netbox(
         context=ProviderCallContext(provider_id="netbox:primary", operation="list_objects"),
     )
 
-    assert seen == ["https://netbox.example/api/ipam/vlans/?site=prg1&status=active"]
-
-
-@pytest.mark.asyncio
-async def test_netbox_list_pushes_the_query_for_devices_and_sites(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``list()`` honours its ``query`` argument for both resource types."""
-    provider = _provider(token="netbox-token")
-    seen: list[str] = []
-    _install_transport(
-        monkeypatch,
-        _json_transport(
-            {
-                "/api/dcim/devices/": {"results": [], "next": None},
-                "/api/dcim/sites/": {"results": [], "next": None},
-            },
-            seen,
-        ),
-    )
-    context = ProviderCallContext(provider_id="netbox:primary", operation="list")
-
-    await provider.list(
-        netbox_provider_module.ResourceType.DEVICE, {"role": "edge"}, context=context
-    )
-    await provider.list(netbox_provider_module.ResourceType.SITE, {"group": "eu"}, context=context)
-
     assert seen == [
-        "https://netbox.example/api/dcim/devices/?role=edge",
-        "https://netbox.example/api/dcim/sites/?group=eu",
+        "https://netbox.example/api/ipam/vlans/?site=prg1&status=active&limit=100&ordering=id"
     ]
 
 
-def test_netbox_tags_become_filterable_device_tags() -> None:
-    """NetBox tag slugs land in the key/value tag map the platform filters on.
-
-    Native tags alone are not reachable from device search or a run form's
-    ``tag.*`` filter, both of which read the ``tags`` map.
-    """
-    provider = _provider()
-
-    descriptor = provider._map_device(
-        {
-            "id": 1,
-            "name": "router-1",
-            "role": {"slug": "edge"},
-            "tags": [{"slug": "core"}, {"name": "wan"}],
-        }
-    )
-
-    assert descriptor.tags == {"role": "edge", "tag:core": "true", "tag:wan": "true"}
-    assert descriptor.native_tags == ("core", "wan")
-
-
-def test_netbox_tag_key_prefix_is_configurable_and_avoids_role_collisions() -> None:
-    """The prefix is what keeps a NetBox tag named ``role`` from shadowing the role."""
-    prefixed = _provider()._map_device(
-        {"id": 1, "name": "r1", "role": {"slug": "edge"}, "tags": [{"slug": "role"}]}
-    )
-    bare = _provider({"tag_key_prefix": ""})._map_device(
-        {"id": 1, "name": "r1", "tags": [{"slug": "core"}]}
-    )
-
-    assert prefixed.tags == {"role": "edge", "tag:role": "true"}
-    assert bare.tags == {"core": "true"}
-
-
-def test_netbox_maps_manufacturer_to_vendor_and_extras_to_descriptive() -> None:
-    """Vendor is a first-class device column the UI filters on; it was always None.
-
-    Serial, asset tag, rack, position, tenant and location have no device column,
-    so they ride along in ``descriptive``, which is GIN-indexed and API-visible.
-    """
-    provider = _provider()
-
-    descriptor = provider._map_device(
-        {
-            "id": 1,
-            "name": "router-1",
-            "device_type": {"model": "MX204", "manufacturer": {"name": "Juniper"}},
-            "serial": "ABC123",
-            "asset_tag": "ASSET-9",
-            "rack": {"name": "R12"},
-            "position": 21,
-            "tenant": {"slug": "acme"},
-            "location": {"slug": "hall-a"},
-            "primary_ip6": {"address": "2001:db8::10/128"},
-        }
-    )
-
-    assert descriptor.vendor == "Juniper"
-    assert descriptor.model == "MX204"
-    assert descriptor.descriptive["serial"] == "ABC123"
-    assert descriptor.descriptive["asset_tag"] == "ASSET-9"
-    assert descriptor.descriptive["rack"] == "R12"
-    assert descriptor.descriptive["position"] == 21
-    assert descriptor.descriptive["tenant"] == "acme"
-    assert descriptor.descriptive["location"] == "hall-a"
-    assert descriptor.descriptive["mgmt_host_v6"] == "2001:db8::10"
-
-
-def test_netbox_omits_descriptive_extras_a_device_does_not_carry() -> None:
-    """A device with none of the optional fields gains no empty keys."""
-    descriptor = _provider()._map_device({"id": 1, "name": "router-1"})
-
-    for absent in ("serial", "asset_tag", "rack", "position", "tenant", "mgmt_host_v6"):
-        assert absent not in descriptor.descriptive
-    assert descriptor.vendor is None
-
-
-def test_netbox_device_provider_url_prefers_display_url() -> None:
-    """The deep link comes from NetBox's own URL fields, not a constructed path."""
-    provider = _provider()
-
-    from_display = provider._map_device(
-        {
-            "id": 1,
-            "name": "r1",
-            "display_url": "https://netbox.example/dcim/devices/1/",
-            "url": "https://netbox.example/api/dcim/devices/1/",
-        }
-    )
-    from_api_url = provider._map_device(
-        {"id": 2, "name": "r2", "url": "https://netbox.example/api/dcim/devices/2/"}
-    )
-
-    assert from_display.descriptive["provider_url"] == "https://netbox.example/dcim/devices/1/"
-    assert from_api_url.descriptive["provider_url"] == "https://netbox.example/dcim/devices/2/"
-
-
 def test_netbox_provider_url_rejects_an_off_origin_link() -> None:
-    """A NetBox echoing another host must not become an off-site redirect."""
-    descriptor = _provider()._map_device(
-        {"id": 1, "name": "r1", "display_url": "https://evil.example/dcim/devices/1/"}
+    """A NetBox echoing another host must not become an off-site redirect.
+
+    ``display_url`` is whatever the instance says it is, and it is rendered as a link an
+    operator clicks. A NetBox that has been told its own base URL is somewhere else --
+    or one behind a proxy that rewrites it -- would otherwise turn every row on the
+    objects page into a link off this origin.
+    """
+    assert (
+        _provider()._provider_url(
+            {"id": 1, "name": "r1", "display_url": "https://evil.example/dcim/devices/1/"}
+        )
+        is None
     )
 
-    assert "provider_url" not in descriptor.descriptive
 
-
-def test_netbox_site_carries_a_provider_url() -> None:
-    site = _provider()._map_site(
-        {
-            "id": 7,
-            "slug": "prg1",
-            "name": "Prague 1",
-            "display_url": "https://netbox.example/dcim/sites/7/",
-        }
+def test_netbox_provider_url_prefers_the_instance_link_on_its_own_origin() -> None:
+    """The link is worth having when it is genuinely this NetBox's own."""
+    assert (
+        _provider()._provider_url(
+            {"id": 1, "name": "r1", "display_url": "https://netbox.example/dcim/devices/1/"}
+        )
+        == "https://netbox.example/dcim/devices/1/"
     )
-
-    assert site.descriptive["provider_url"] == "https://netbox.example/dcim/sites/7/"
-    assert site.descriptive["slug"] == "prg1"
 
 
 @pytest.mark.asyncio
@@ -902,14 +796,142 @@ async def test_netbox_device_query_narrows_every_device_read(
         monkeypatch,
         _json_transport({"/api/dcim/devices/": {"results": [], "next": None}}, seen),
     )
-    context = ProviderCallContext(provider_id="netbox:primary", operation="query_devices")
+    context = ProviderCallContext(provider_id="netbox:primary", operation="read_objects")
 
-    await provider.query_devices("", context=context)
-    await provider.query_devices("site=prg1", context=context)
+    await provider.list_objects("device", context=context)
+    await provider.list_objects("device", {"site": "prg1"}, context=context)
 
     assert seen == [
-        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge",
-        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge&site=prg1",
+        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge&limit=100&ordering=id",
+        "https://netbox.example/api/dcim/devices/?status=active&role=wan-edge&site=prg1&limit=100&ordering=id",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_active_saved_scope_maps_a_tenant_and_compiles_typed_family_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One scope applies consistently without widening families that have no tenant."""
+    provider = _provider(
+        {
+            "inventory_scopes": [
+                {
+                    "name": "Tenant A",
+                    "tenant_slug": "tenant-a",
+                    "queries": {
+                        "device": [{"field": "status", "lookup": "not", "value": "offline"}],
+                        "interface": [{"field": "device_id", "lookup": "exact", "value": "7"}],
+                    },
+                    "tenant_scope_exemptions": ["interface"],
+                }
+            ],
+            "active_inventory_scope": "Tenant A",
+        },
+        token="netbox-token",
+    )
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _json_transport(
+            {
+                "/api/dcim/devices/": {"results": [], "next": None},
+                "/api/dcim/sites/": {"results": [], "next": None},
+                "/api/dcim/interfaces/": {"results": [], "next": None},
+                "/api/tenancy/tenants/": {"results": [], "next": None},
+            },
+            seen,
+        ),
+    )
+    context = ProviderCallContext(
+        provider_id="netbox:primary",
+        operation="read_objects",
+        object_query_schema={
+            "type": "object",
+            "properties": {
+                "tenant": {"type": "string"},
+                "slug": {"type": "string"},
+                "status__n": {"type": "string"},
+                "device_id": {"type": "integer"},
+            },
+        },
+    )
+
+    await provider.list_objects("device", context=context)
+    await provider.list_objects("site", context=context)
+    await provider.list_objects("interface", context=context)
+    await provider.list_objects("tenant", context=context)
+
+    assert seen == [
+        "https://netbox.example/api/dcim/devices/?tenant=tenant-a&status__n=offline&limit=100&ordering=id",
+        "https://netbox.example/api/dcim/sites/?tenant=tenant-a&limit=100&ordering=id",
+        # Interfaces carry no tenant themselves. The provider never guesses a relational
+        # filter; this family is read only because the scope explicitly exempts it.
+        "https://netbox.example/api/dcim/interfaces/?device_id=7&limit=100&ordering=id",
+        "https://netbox.example/api/tenancy/tenants/?slug=tenant-a&limit=100&ordering=id",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tenant_scope_suppresses_a_family_without_a_proven_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A generic narrowing rule is not proof that every returned row belongs to a tenant."""
+    provider = _provider(
+        {
+            "inventory_scopes": [
+                {
+                    "name": "Tenant A",
+                    "tenant_slug": "tenant-a",
+                    "queries": {
+                        "interface": [{"field": "name", "lookup": "contains", "value": "uplink"}]
+                    },
+                }
+            ],
+            "active_inventory_scope": "Tenant A",
+        },
+        token="netbox-token",
+    )
+
+    def must_not_connect(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an unscoped tenant family must not reach NetBox")
+
+    _install_transport(monkeypatch, httpx.MockTransport(must_not_connect))
+    context = ProviderCallContext(provider_id="netbox:primary", operation="read_objects")
+
+    assert await provider.list_objects("interface", context=context) == []
+    pages = [page async for page in provider.iter_object_pages("interface", context=context)]
+    assert pages == [[]]
+    with pytest.raises(InventoryProviderError, match="suppressed"):
+        await provider.get_object("interface", "7", context=context)
+
+
+@pytest.mark.asyncio
+async def test_saved_scope_is_anded_with_legacy_and_caller_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _provider(
+        {
+            "device_query": "status=active",
+            "object_queries": {"device": "role=router"},
+            "inventory_scopes": [{"name": "A", "tenant_slug": "tenant-a"}],
+            "active_inventory_scope": "A",
+        },
+        token="netbox-token",
+    )
+    seen: list[str] = []
+    _install_transport(
+        monkeypatch,
+        _json_transport({"/api/dcim/devices/": {"results": [], "next": None}}, seen),
+    )
+
+    await provider.list_objects(
+        "device",
+        {"site": "ams01"},
+        context=ProviderCallContext(provider_id="netbox:primary", operation="read_objects"),
+    )
+
+    assert seen == [
+        "https://netbox.example/api/dcim/devices/?tenant=tenant-a&role=router&status=active&site=ams01&limit=100&ordering=id"
     ]
 
 
@@ -945,48 +967,6 @@ async def test_netbox_ipam_objects_carry_a_provider_url(
     assert objects[0].descriptive["provider_url"] == "https://netbox.example/ipam/vlans/5/"
 
 
-@pytest.mark.parametrize(
-    ("status", "expected"),
-    [
-        ({"value": "active", "label": "Active"}, None),
-        ({"value": "offline"}, "disabled"),
-        ({"value": "decommissioning"}, "disabled"),
-        ({"value": "planned"}, "maintenance"),
-        ({"value": "staged"}, "maintenance"),
-        ({"value": "failed"}, "maintenance"),
-        ({"value": "inventory"}, "maintenance"),
-        ("offline", "disabled"),  # older payloads send a bare slug
-        (None, None),
-        ({"value": "something-custom"}, None),
-    ],
-)
-def test_netbox_device_status_maps_to_maintenance_state(status: Any, expected: str | None) -> None:
-    """NetBox lifecycle status becomes the platform's maintenance state.
-
-    An unmapped status yields None so the device's existing state is left alone
-    rather than being forced back to active.
-    """
-    descriptor = _provider()._map_device({"id": 1, "name": "r1", "status": status})
-
-    assert (
-        descriptor.maintenance_state.value if descriptor.maintenance_state else None
-    ) == expected
-
-
-def test_netbox_status_map_is_configurable() -> None:
-    """A deployment can decide what its own statuses mean."""
-    provider = _provider({"status_map": {"active": "maintenance", "offline": "active"}})
-
-    frozen = provider._map_device({"id": 1, "name": "r1", "status": {"value": "active"}})
-    thawed = provider._map_device({"id": 2, "name": "r2", "status": {"value": "offline"}})
-    # 'planned' is no longer in the map, so it stops being mapped at all.
-    unmapped = provider._map_device({"id": 3, "name": "r3", "status": {"value": "planned"}})
-
-    assert frozen.maintenance_state is MaintenanceState.MAINTENANCE
-    assert thawed.maintenance_state is MaintenanceState.ACTIVE
-    assert unmapped.maintenance_state is None
-
-
 def test_netbox_status_map_rejects_an_unknown_maintenance_state() -> None:
     """Only states the platform models are accepted."""
     with pytest.raises(ValueError, match="status_map"):
@@ -1000,398 +980,1185 @@ def test_netbox_status_map_rejects_an_unknown_maintenance_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_netbox_get_site_resolves_a_slug_through_the_list_endpoint(
+async def test_a_connection_test_asks_what_netbox_it_reached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The default site key is a slug, which NetBox's detail route cannot take.
+    """``/api/status/`` proves the token works and says which NetBox answered.
 
-    ``list_sites`` emits ``field_map['site.external_id']`` — ``site.slug`` by
-    default — so a detail read of the value it just handed out would hit
-    ``/api/dcim/sites/prg1/`` and 404. It has to go through a filter first.
+    Listing one device proves no more -- both need a valid token -- and answers nothing
+    about the release or the plugins installed on it, which is exactly what an operator
+    wants to see when a sync returns something they did not expect.
     """
-    provider = _provider(token="netbox-token")
-    seen: list[str] = []
-    _install_transport(
-        monkeypatch,
-        _json_transport(
-            {
-                "/api/dcim/sites/": {
-                    "results": [{"id": 7, "slug": "prg1", "name": "Prague 1"}],
-                    "next": None,
-                }
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "netbox-version": "4.3.0",
+                "netbox-full-version": "4.3.0-Docker-3.3.0",
+                "plugins": {"netbox_dns": "1.1.4"},
             },
-            seen,
-        ),
-    )
-
-    site = await provider.get(
-        ResourceType.SITE,
-        "prg1",
-        context=ProviderCallContext(provider_id="netbox:primary", operation="get"),
-    )
-
-    assert seen == ["https://netbox.example/api/dcim/sites/?slug=prg1"]
-    assert isinstance(site, SiteRef)
-    assert site.external_id == "prg1"
-    assert site.name == "Prague 1"
-
-
-@pytest.mark.asyncio
-async def test_netbox_get_site_uses_the_detail_route_when_keyed_by_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Remapping the key to the numeric id keeps the cheaper single-object read."""
-    provider = _provider({"field_map": {"site.external_id": "site.id"}}, token="netbox-token")
-    seen: list[str] = []
-    _install_transport(
-        monkeypatch,
-        _json_transport(
-            {"/api/dcim/sites/7/": {"id": 7, "slug": "prg1", "name": "Prague 1"}}, seen
-        ),
-    )
-
-    site = await provider.get(
-        ResourceType.SITE,
-        "7",
-        context=ProviderCallContext(provider_id="netbox:primary", operation="get"),
-    )
-
-    assert seen == ["https://netbox.example/api/dcim/sites/7/"]
-    assert isinstance(site, SiteRef)
-    assert site.external_id == "7"
-
-
-@pytest.mark.asyncio
-async def test_netbox_get_site_fails_closed_when_the_filter_matches_nothing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A slug NetBox does not know is NOT_FOUND, not a mis-keyed match."""
-    provider = _provider(token="netbox-token")
-    _install_transport(
-        monkeypatch,
-        _json_transport({"/api/dcim/sites/": {"results": [], "next": None}}),
-    )
-
-    with pytest.raises(InventoryProviderError) as excinfo:
-        await provider.get(
-            ResourceType.SITE,
-            "nope",
-            context=ProviderCallContext(provider_id="netbox:primary", operation="get"),
         )
 
-    assert excinfo.value.envelope.code == ProviderErrorCode.NOT_FOUND
-
-
-def test_netbox_a_native_tag_never_overwrites_the_mapped_role() -> None:
-    """With an empty prefix, a NetBox tag named ``role`` must lose to the role.
-
-    ``tag_key_prefix: ""`` is documented as supported, and the collision it
-    reopens would leave ``tags[role]`` reading ``"true"`` instead of the role —
-    silently dropping the device out of every role filter.
-    """
-    device = _provider({"tag_key_prefix": ""})._map_device(
-        {"id": 1, "name": "r1", "role": {"slug": "edge"}, "tags": [{"slug": "role"}]}
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    result = await _provider(token="netbox-token").test_connection(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="test_connection",
+            query_hash="status",
+            config_version=1,
+        )
     )
 
-    assert device.tags == {"role": "edge"}
+    assert requested == ["/api/status/"]
+    assert result.ok is True
+    assert result.message == "NetBox 4.3.0-Docker-3.3.0 connection succeeded"
+    assert result.safe_details == {
+        "netbox_version": "4.3.0",
+        "netbox_full_version": "4.3.0-Docker-3.3.0",
+        "netbox_plugins": {"netbox_dns": "1.1.4"},
+    }
 
 
-# --- the site tree -------------------------------------------------------------------
-# NetBox keeps two independent nested hierarchies above a site -- Region and Site
-# Group -- and a platform Site has one parent, so the provider has to choose. These
-# cover the choice, what happens to the axis that loses, and the mechanics that make
-# synthesized nodes safe to materialize alongside real sites.
-
-_SITES_WITH_HIERARCHY = {
-    "results": [
-        {
-            "id": 1,
-            "slug": "mt1",
-            "name": "Minas Tirith",
-            "region": {"id": 20, "slug": "gondor", "name": "Gondor"},
-            "group": {"id": 30, "slug": "datacenter", "name": "Datacenter"},
-        },
-        {
-            "id": 2,
-            "slug": "hob1",
-            "name": "Hobbiton",
-            "region": {"id": 21, "slug": "eriador", "name": "Eriador"},
-            "group": {"id": 31, "slug": "branch", "name": "Branch"},
-        },
-    ],
-    "next": None,
-}
-
-_REGIONS = {
-    "results": [
-        {"id": 10, "slug": "middle-earth", "name": "Middle-earth", "parent": None},
-        {
-            "id": 20,
-            "slug": "gondor",
-            "name": "Gondor",
-            "parent": {"id": 10, "slug": "middle-earth", "name": "Middle-earth"},
-        },
-        {
-            "id": 21,
-            "slug": "eriador",
-            "name": "Eriador",
-            "parent": {"id": 10, "slug": "middle-earth", "name": "Middle-earth"},
-        },
-        # Referenced by no synced site, so it must not be emitted.
-        {
-            "id": 22,
-            "slug": "mordor",
-            "name": "Mordor",
-            "parent": {"id": 10, "slug": "middle-earth", "name": "Middle-earth"},
-        },
-    ],
-    "next": None,
-}
-
-_SITE_GROUPS = {
-    "results": [
-        {"id": 30, "slug": "datacenter", "name": "Datacenter", "parent": None},
-        {"id": 31, "slug": "branch", "name": "Branch", "parent": None},
-    ],
-    "next": None,
-}
-
-
-def _hierarchy_transport(
-    monkeypatch: pytest.MonkeyPatch, sites: Any = _SITES_WITH_HIERARCHY
+@pytest.mark.asyncio
+async def test_a_refused_connection_test_reports_the_error_and_no_details(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_transport(
-        monkeypatch,
-        _json_transport(
+    """A failed probe learned nothing about the instance, so it claims nothing."""
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"detail": "Invalid token"})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    result = await _provider(token="wrong-token").test_connection(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="test_connection",
+            query_hash="status",
+            config_version=1,
+        )
+    )
+
+    assert result.ok is False
+    assert result.safe_details == {}
+    assert result.error is not None
+    assert result.error["code"] == ProviderErrorCode.AUTH_FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_a_netbox_that_answers_status_with_less_still_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy or an older release may reply with fewer keys; that is not a failure."""
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"django-version": "5.1.8"})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    result = await _provider(token="netbox-token").test_connection(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="test_connection",
+            query_hash="status",
+            config_version=1,
+        )
+    )
+
+    assert result.ok is True
+    assert result.message == "NetBox connection succeeded"
+    assert result.safe_details == {}
+
+
+_SCHEMA_FIXTURE = (
+    pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "netbox-4.3-schema.json"
+)
+
+
+def _discovery_handler(
+    schema: dict[str, Any] | None = None,
+    *,
+    custom_fields: list[dict[str, Any]] | None = None,
+    schema_status: int = 200,
+) -> tuple[Callable[[httpx.Request], Any], list[str]]:
+    """A NetBox that answers status, schema and custom fields, recording what was asked."""
+    requested: list[str] = []
+    document = json.loads(_SCHEMA_FIXTURE.read_text()) if schema is None else schema
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path == "/api/status/":
+            return httpx.Response(200, json={"netbox-full-version": "4.3.0-Docker-3.3.0"})
+        if request.url.path == "/api/schema/":
+            if schema_status != 200:
+                return httpx.Response(schema_status, json={"detail": "not found"})
+            return httpx.Response(200, json=document)
+        if request.url.path == "/api/extras/custom-fields/":
+            return httpx.Response(200, json={"results": custom_fields or [], "next": None})
+        return httpx.Response(404, json={"detail": "unexpected"})
+
+    return handler, requested
+
+
+async def _test_connection(provider: NetBoxInventoryProvider) -> Any:
+    return await provider.test_connection(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="test_connection",
+            query_hash="discovery",
+            config_version=1,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_connection_test_leaves_the_schema_alone_unless_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The schema is several megabytes. A connection test does not fetch it by default."""
+    handler, requested = _discovery_handler()
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _test_connection(_provider(token="netbox-token"))
+
+    assert requested == ["/api/status/"]
+    assert result.ok is True
+    assert "netbox_families_served" not in result.safe_details
+
+
+@pytest.mark.asyncio
+async def test_a_discovering_connection_test_reports_what_the_instance_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Asked to, it answers the question a shipped catalogue cannot: what does *this* one have."""
+    handler, requested = _discovery_handler(
+        custom_fields=[
             {
-                "/api/dcim/sites/": sites,
-                "/api/dcim/regions/": _REGIONS,
-                "/api/dcim/site-groups/": _SITE_GROUPS,
+                "name": "hegemony_ssh_ref",
+                "type": {"value": "text"},
+                "object_types": ["dcim.device"],
             }
-        ),
+        ]
+    )
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _test_connection(_provider({"schema_discovery": True}, token="netbox-token"))
+
+    assert requested == ["/api/status/", "/api/schema/", "/api/extras/custom-fields/"]
+    assert result.ok is True
+    assert result.safe_details["netbox_full_version"] == "4.3.0-Docker-3.3.0"
+    assert result.safe_details["netbox_families_offered"] == len(catalogue.OBJECT_TYPES)
+    # Nothing undeclared, and that is the seed being complete rather than the report
+    # being broken: the shipped catalogue is generated from this very schema, so a stock
+    # 4.3 serves exactly what it offers. An instance with a NetBox plugin installed, or
+    # on a later release, is where this becomes non-zero -- which is the number's job.
+    assert result.safe_details["netbox_families_undeclared"] == 0
+    assert "netbox_families_missing" not in result.safe_details
+    assert result.safe_details["netbox_custom_fields"] == 1
+    # A stock 4.3 serves every family the catalogue offers and no shape it cannot read.
+    assert "netbox_families_missing" not in result.safe_details
+    assert "netbox_schema_warnings" not in result.safe_details
+
+
+@pytest.mark.asyncio
+async def test_discovery_names_the_object_types_this_netbox_cannot_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The answer to ticking an object type and syncing nothing at all.
+
+    An older release, or one whose plugins were trimmed, does not serve every family the
+    catalogue offers. Until this, nothing said so until the first empty sync.
+    """
+    document = json.loads(_SCHEMA_FIXTURE.read_text())
+    removed = catalogue.BY_ID["vpn_tunnel"]
+    document["paths"].pop(removed.endpoint)
+    handler, _requested = _discovery_handler(document)
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _test_connection(_provider({"schema_discovery": True}, token="netbox-token"))
+
+    assert result.ok is True
+    assert result.safe_details["netbox_families_missing"] == ["vpn_tunnel"]
+    assert result.safe_details["netbox_families_offered"] == len(catalogue.OBJECT_TYPES) - 1
+
+
+@pytest.mark.asyncio
+async def test_a_schema_it_cannot_read_leaves_the_connection_test_passing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The connection already succeeded. Losing the extra detail must not undo that."""
+    handler, requested = _discovery_handler(schema_status=404)
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _test_connection(_provider({"schema_discovery": True}, token="netbox-token"))
+
+    assert "/api/schema/" in requested
+    assert result.ok is True
+    assert result.error is None
+    assert result.safe_details == {"netbox_full_version": "4.3.0-Docker-3.3.0"}
+
+
+@pytest.mark.asyncio
+async def test_discovery_extends_the_registered_catalogue_rather_than_shadowing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Families the plugin already knows keep the ids it registers.
+
+    Returning the derived spelling would leave an instance offering two object types for
+    the same family, and strand every row already synced under the registered one.
+    """
+    handler, _requested = _discovery_handler()
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _provider(token="netbox-token").discover(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="discover",
+            query_hash="discover",
+            config_version=1,
+        )
     )
 
+    discovered = {spec.id for spec in result.object_types}
+    assert {entry.id for entry in catalogue.OBJECT_TYPES} <= discovered
+    assert "dcim.interfaces" not in discovered
+    # Devices and sites are families like any other now, but under the ids this plugin
+    # registers: the derived spelling would strand every row already stored.
+    assert {"device", "site"} <= discovered
+    assert "dcim.devices" not in discovered
+    assert "dcim.sites" not in discovered
+    # ...but an interface still reaches its device.
+    interface = next(spec for spec in result.object_types if spec.id == "interface")
+    assert ("device", "device") in {
+        (edge.rel, edge.target_object_type) for edge in interface.relationships
+    }
+    # And the instance's own families arrive under an app-qualified id.
+    assert any("." in object_type for object_type in discovered)
+    assert result.source_version is not None
 
-async def _listed(provider: NetBoxInventoryProvider) -> list[Any]:
-    return await provider.list_sites(
-        context=ProviderCallContext(provider_id="netbox:primary", operation="list_sites")
+
+@pytest.mark.asyncio
+async def test_every_discovered_type_carries_the_mapping_to_read_it_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spec without its mapping is an object type nothing can actually fetch."""
+    handler, _requested = _discovery_handler()
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    result = await _provider(token="netbox-token").discover(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="discover",
+            query_hash="discover",
+            config_version=1,
+        )
     )
 
+    assert {spec.id for spec in result.object_types} == set(result.mappings)
+    assert result.mappings["interface"].object_type == "interface"
+
 
 @pytest.mark.asyncio
-async def test_regions_become_the_site_tree_by_default(
+async def test_discovery_reads_every_custom_field_rather_than_a_preview_of_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A NetBox site has no parent of its own; its region is the hierarchy.
+    """A custom field past the preview cap is an attribute the catalogue would never name.
 
-    Without this the platform received a flat list -- ``_map_site`` looked for a
-    ``parent`` key that NetBox never sends -- and the site tree, which the API
-    exposes and "include child sites" targeting depends on, had nothing in it.
+    Custom fields are read to *derive* from, not to show: each one becomes an attribute
+    on every family it applies to. Stopping at the preview cap would leave the instance
+    describing itself as though the fields past it were not defined -- and nothing
+    downstream could tell that from an instance where they really are not. So this read
+    is bounded by the page limit, which raises, rather than by a cap that truncates.
     """
+    pages = [
+        {
+            "results": [{"name": name, "type": {"value": "text"}, "object_types": ["dcim.device"]}],
+            "next": next_url,
+        }
+        for name, next_url in (
+            ("first", "https://netbox.example/api/extras/custom-fields/?page=2"),
+            ("second", "https://netbox.example/api/extras/custom-fields/?page=3"),
+            ("third", None),
+        )
+    ]
+    document = json.loads(_SCHEMA_FIXTURE.read_text())
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/schema/":
+            return httpx.Response(200, json=document)
+        page = int(request.url.params.get("page", 1))
+        return httpx.Response(200, json=pages[page - 1])
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
     provider = _provider(token="netbox-token")
-    _hierarchy_transport(monkeypatch)
+    # One page's worth: under a preview cap the last two fields would never be fetched.
+    provider._services.limits = InventoryLimits(
+        max_provider_pages=100, max_run_targets=1000, max_preview_devices=1
+    )
 
-    listed = await _listed(provider)
-    by_id = {site.external_id: site for site in listed}
+    result = await provider.discover(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="discover",
+            query_hash="discover",
+            config_version=1,
+        )
+    )
 
-    # The regions arrive as sites, nested by their own parent...
-    assert by_id["region:middle-earth"].parent_external_id is None
-    assert by_id["region:gondor"].parent_external_id == "region:middle-earth"
-    assert by_id["region:eriador"].parent_external_id == "region:middle-earth"
-    # ...and the real sites hang from them.
-    assert by_id["mt1"].parent_external_id == "region:gondor"
-    assert by_id["hob1"].parent_external_id == "region:eriador"
+    device = next(spec for spec in result.object_types if spec.id == "device")
+    properties = set(device.field_schema["properties"])
+    assert {"custom_field_first", "custom_field_second", "custom_field_third"} <= properties
 
 
 @pytest.mark.asyncio
-async def test_only_the_ancestors_of_synced_sites_are_emitted(
+async def test_custom_fields_that_were_read_successfully_are_not_warnings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A scoped sync must not drag in the whole of NetBox's geography.
+    """``warnings`` says what could not be interpreted, not what went well.
 
-    ``device_query`` exists so an operator can sync 300 devices out of 50,000;
-    emitting every region regardless would undo that for sites, and NetBox's
-    region tree can describe an entire estate the platform never syncs.
+    An operator reading a discovery result should be able to treat a non-empty
+    ``warnings`` as "something here needs looking at". Counting a successful read into it
+    puts every well-configured instance permanently in that state.
     """
-    provider = _provider(token="netbox-token")
-    _hierarchy_transport(monkeypatch)
+    handler, _requested = _discovery_handler(
+        custom_fields=[
+            {"name": "hegemony_ssh_ref", "type": {"value": "text"}, "object_types": ["dcim.device"]}
+        ]
+    )
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
 
-    listed = await _listed(provider)
+    result = await _provider(token="netbox-token").discover(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="discover",
+            query_hash="discover",
+            config_version=1,
+        )
+    )
 
-    ids = {site.external_id for site in listed}
-    assert "region:mordor" not in ids, "an unreferenced region was materialized"
-    # Its parent is still there, because two synced sites do descend from it.
-    assert "region:middle-earth" in ids
+    device = next(spec for spec in result.object_types if spec.id == "device")
+    # The field was read -- this is not "discovery found nothing to warn about".
+    assert "custom_field_hegemony_ssh_ref" in device.field_schema["properties"]
+    assert result.warnings == ()
 
 
 @pytest.mark.asyncio
-async def test_both_hierarchy_axes_are_tagged_whichever_one_is_the_tree(
+async def test_discovery_raises_where_the_connection_test_stays_quiet(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Choosing one axis must not lose the other.
+    """The two read the same document for different reasons.
 
-    Only one of region and site group can be the parent, but an operator still
-    wants to select "every branch site" or "everything in Gondor". Both are
-    surfaced as tags so the axis that lost stays usable for filtering.
+    A connection test reports on a connection that already worked, so it swallows a
+    schema it cannot read. Discovery was asked for the description itself, and there is
+    nothing to return in its place.
     """
-    provider = _provider(token="netbox-token")
-    _hierarchy_transport(monkeypatch)
+    handler, _requested = _discovery_handler(schema_status=404)
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
 
-    listed = await _listed(provider)
-    mt1 = next(site for site in listed if site.external_id == "mt1")
+    with pytest.raises(InventoryProviderError):
+        await _provider(token="netbox-token").discover(
+            context=ProviderCallContext(
+                provider_id="netbox:primary",
+                operation="discover",
+                query_hash="discover",
+                config_version=1,
+            )
+        )
 
-    assert mt1.tags == {"region": "gondor", "group": "datacenter"}
 
-
-@pytest.mark.asyncio
-async def test_site_group_can_be_the_tree_instead(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other axis, for estates modelled by function rather than geography."""
-    provider = _provider({"site_tree_source": "site_group"}, token="netbox-token")
-    _hierarchy_transport(monkeypatch)
-
-    listed = await _listed(provider)
-    by_id = {site.external_id: site for site in listed}
-
-    assert by_id["mt1"].parent_external_id == "site-group:datacenter"
-    assert by_id["hob1"].parent_external_id == "site-group:branch"
-    assert "region:gondor" not in by_id, "the unchosen axis must not also be materialized"
-    # ...and the region is still a tag.
-    assert by_id["mt1"].tags["region"] == "gondor"
+def test_the_netbox_provider_declares_the_capability_it_implements() -> None:
+    assert Capability.DISCOVER in _provider().capabilities
 
 
 @pytest.mark.asyncio
-async def test_site_tree_source_none_keeps_the_flat_list(
+async def test_netbox_reads_a_family_only_the_instance_knows_about(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The previous behaviour stays reachable, and costs no extra request."""
-    provider = _provider({"site_tree_source": "none"}, token="netbox-token")
-    calls: list[str] = []
-    _install_transport(
-        monkeypatch,
-        _json_transport(
-            {
-                "/api/dcim/sites/": _SITES_WITH_HIERARCHY,
-                "/api/dcim/regions/": _REGIONS,
+    """A NetBox plugin's model is readable although no catalogue has ever named it.
+
+    This is the payoff of discovery and the one thing a shipped catalogue can never do:
+    ``netbox_dns.records`` exists on one operator's NetBox and nowhere else. The provider
+    is built fresh for the call and has never heard of it, so everything it needs --
+    where to fetch it and how to read a record -- arrives on the call context, exactly as
+    the platform stored it when the instance described itself.
+    """
+    paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(
+            str(request.url.path) + ("?" + request.url.query.decode() if request.url.query else "")
+        )
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": 12,
+                        "name": "www",
+                        "zone": {"name": "example.com"},
+                        "type": "A",
+                        "value": "10.0.0.8",
+                    }
+                ],
+                "next": None,
             },
-            recorder=calls,
+        )
+
+    provider = _provider(token="netbox-token")
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    mapping = ObjectFieldMapping(
+        object_type="netbox_dns.records",
+        identity="id",
+        name_field="name",
+        field_map={"name": "name", "zone": "zone.name", "type": "type", "value": "value"},
+        source={"endpoint": "/api/plugins/netbox-dns/records/"},
+    )
+    objects = await provider.list_objects(
+        "netbox_dns.records",
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="auto_sync_objects:netbox_dns.records",
+            object_mapping=mapping,
         ),
     )
 
-    listed = await _listed(provider)
-
-    assert [site.external_id for site in listed] == ["mt1", "hob1"]
-    assert all(site.parent_external_id is None for site in listed)
-    assert not any("/regions/" in call for call in calls), (
-        "the hierarchy endpoint was fetched even though no tree was asked for"
+    assert paths == ["/api/plugins/netbox-dns/records/?limit=100&ordering=id"]
+    (record,) = objects
+    assert (record.object_type, record.external_id, record.name) == (
+        "netbox_dns.records",
+        "12",
+        "www",
     )
+    assert record.attributes == {
+        "name": "www",
+        "zone": "example.com",
+        "type": "A",
+        "value": "10.0.0.8",
+    }
 
 
 @pytest.mark.asyncio
-async def test_a_region_and_a_site_sharing_a_slug_do_not_collide(
+async def test_discovered_only_family_uses_its_instances_query_schema_for_tenant_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """NetBox slugs are unique per model, not globally.
+    paths: list[str] = []
 
-    A region and a site may both be "gondor". The platform keys sites on
-    (provider_id, external_id), so without the prefix the two would be one row --
-    a site that is its own parent, or an aggregation node with a device on it.
-    """
-    provider = _provider(token="netbox-token")
-    _hierarchy_transport(
-        monkeypatch,
-        sites={
-            "results": [
-                {
-                    "id": 1,
-                    "slug": "gondor",
-                    "name": "Gondor DC",
-                    "region": {"id": 20, "slug": "gondor", "name": "Gondor"},
-                }
-            ],
-            "next": None,
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(str(request.url))
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    provider = _provider(
+        {
+            "inventory_scopes": [{"name": "Tenant A", "tenant_slug": "tenant-a"}],
+            "active_inventory_scope": "Tenant A",
         },
+        token="netbox-token",
+    )
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    mapping = ObjectFieldMapping(
+        object_type="custom.widgets",
+        identity="id",
+        name_field="name",
+        field_map={"name": "name", "tenant": "tenant.slug"},
+        source={"endpoint": "/api/plugins/custom/widgets/"},
     )
 
-    listed = await _listed(provider)
-    ids = [site.external_id for site in listed]
+    await provider.list_objects(
+        "custom.widgets",
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="auto_sync_objects:custom.widgets",
+            object_mapping=mapping,
+            object_query_schema={
+                "type": "object",
+                "properties": {"tenant": {"type": "string"}},
+            },
+        ),
+    )
 
-    assert len(ids) == len(set(ids)), f"duplicate external ids: {ids}"
-    assert {"gondor", "region:gondor"} <= set(ids)
-    site = next(one for one in listed if one.external_id == "gondor")
-    assert site.parent_external_id == "region:gondor"
-    assert site.parent_external_id != site.external_id
+    assert paths == [
+        "https://netbox.example/api/plugins/custom/widgets/?tenant=tenant-a&limit=100&ordering=id"
+    ]
 
 
 @pytest.mark.asyncio
-async def test_get_site_resolves_a_hierarchy_node(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Opening a region row must work, not 404.
-
-    The nodes are sites as far as the platform is concerned, so every read path
-    has to know the prefix -- not only the one that created them.
-    """
-    provider = _provider(token="netbox-token")
-    _hierarchy_transport(monkeypatch)
-
-    node = await provider.get(
-        ResourceType.SITE,
-        "region:gondor",
-        context=ProviderCallContext(provider_id="netbox:primary", operation="get_site"),
-    )
-
-    # get() returns a union; narrow it the way the other site tests here do.
-    assert isinstance(node, SiteRef)
-    assert node.external_id == "region:gondor"
-    assert node.name == "Gondor"
-    assert node.tags == {"node_type": "region"}
-
-
-@pytest.mark.asyncio
-async def test_a_cyclic_hierarchy_does_not_hang_the_sync(
+async def test_a_catalogue_family_gains_the_custom_fields_only_this_instance_defines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The walk climbs data from a remote system, so it stops at the first repeat.
+    """The instance's half of a family the plugin already knows.
 
-    NetBox's own tree cannot contain a cycle, but a sync that hangs is far worse
-    than one that fails: it holds the provider's claim and blocks every later
-    tick, where a failure is retried.
+    ``interface`` is in the shipped catalogue, so the endpoint, the key and the paths all
+    come from there. But a custom field is defined on one NetBox and not the next, and
+    discovery advertises it: the platform merges it into the object type it publishes, so
+    a browse page offers the column. If the read ignored it, that column would be empty
+    for every row on every instance -- an attribute promised and never delivered.
+    """
+    paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(str(request.url.path))
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": 7,
+                        "name": "et-0/0/0",
+                        "custom_fields": {"optic_serial": "OPT-991"},
+                    }
+                ],
+                "next": None,
+            },
+        )
+
+    provider = _provider(token="netbox-token")
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    shipped = BY_ID["interface"].mapping
+    discovered = ObjectFieldMapping(
+        object_type="interface",
+        identity="id",
+        name_field="name",
+        field_map={
+            **shipped.field_map,
+            "custom_field_optic_serial": "custom_fields.optic_serial",
+            # A path the instance disagrees with the plugin about. The overlay's
+            # judgement is the plugin's to keep; discovery adds, it does not overwrite.
+            "name": "display",
+        },
+        source={"endpoint": "/api/plugins/wrong/"},
+    )
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="auto_sync_objects:interface",
+            object_mapping=discovered,
+        ),
+    )
+
+    # Read from the catalogue's endpoint, not the discovered mapping's.
+    assert paths == [BY_ID["interface"].endpoint]
+    (record,) = objects
+    assert record.attributes["custom_field_optic_serial"] == "OPT-991"
+    # The plugin's path for a field both describe still wins.
+    assert record.attributes["name"] == "et-0/0/0"
+
+
+@pytest.mark.asyncio
+async def test_netbox_refuses_a_family_nothing_has_described(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a mapping there is nowhere to read from, and the provider says so.
+
+    The counterpart of the previous test: being handed nothing must not become a guess
+    at an endpoint. A family the catalogue does not carry and the platform cannot
+    describe falls through to the SDK default, which reports that it is not supported.
     """
     provider = _provider(token="netbox-token")
+    _install_transport(monkeypatch, httpx.MockTransport(lambda request: httpx.Response(200)))
+
+    with pytest.raises(InventoryProviderError) as raised:
+        await provider.list_objects(
+            "netbox_dns.records",
+            context=ProviderCallContext(
+                provider_id="netbox:primary",
+                operation="auto_sync_objects:netbox_dns.records",
+            ),
+        )
+    assert raised.value.envelope.code == ProviderErrorCode.MALFORMED_QUERY
+
+
+# ── The retired device/site contract ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resource", [ResourceType.DEVICE, ResourceType.SITE])
+async def test_the_device_contract_refuses_and_says_what_to_do(
+    resource: ResourceType,
+) -> None:
+    """Loud, not quiet, and it names the fix.
+
+    This provider no longer answers for devices and sites through the platform's
+    device/site contract -- they are object families and the platform writes those
+    tables from the stored rows. The alternative to failing here was to decline to serve
+    them at all, which would let a sync succeed while quietly refreshing nothing: an
+    operator would find out weeks later, from a run that targeted a device whose address
+    had changed. A sync that fails once and says "run Discover" is the kinder failure.
+    """
+    provider = _provider(token="netbox-token")
+    context = ProviderCallContext(provider_id="netbox:primary", operation="auto_sync")
+
+    with pytest.raises(InventoryProviderError) as raised:
+        await provider.list(resource, context=context)
+
+    envelope = raised.value.envelope
+    assert envelope.retryable is False, "pressing Sync again will never help"
+    assert "Discover" in envelope.message
+
+
+@pytest.mark.asyncio
+async def test_query_devices_and_list_sites_refuse_the_same_way() -> None:
+    """The two the platform calls during a sync, and the reason they cannot just go.
+
+    Both are ``@abstractmethod`` on the SDK's provider base, so a provider that does not
+    implement them cannot be instantiated at all. They stay, and they refuse.
+    """
+    provider = _provider(token="netbox-token")
+    context = ProviderCallContext(provider_id="netbox:primary", operation="auto_sync")
+
+    # Built when called, not when the tuple is: a tuple of coroutines would leave the
+    # second one un-awaited if the first assertion failed, and the resulting warning
+    # buries the failure that actually matters.
+    for call in (
+        lambda: provider.query_devices("", context=context),
+        lambda: provider.list_sites(context=context),
+    ):
+        with pytest.raises(InventoryProviderError) as raised:
+            await call()
+        assert "Discover" in raised.value.envelope.message
+
+
+@pytest.mark.asyncio
+async def test_a_family_that_is_not_a_device_still_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retiring one contract must not take the rest of the catalogue with it."""
     _install_transport(
         monkeypatch,
         _json_transport(
-            {
-                "/api/dcim/sites/": {
-                    "results": [
-                        {
-                            "id": 1,
-                            "slug": "mt1",
-                            "name": "Minas Tirith",
-                            "region": {"id": 20, "slug": "a", "name": "A"},
-                        }
-                    ],
-                    "next": None,
-                },
-                "/api/dcim/regions/": {
-                    "results": [
-                        {
-                            "id": 20,
-                            "slug": "a",
-                            "name": "A",
-                            "parent": {"id": 21, "slug": "b", "name": "B"},
-                        },
-                        {
-                            "id": 21,
-                            "slug": "b",
-                            "name": "B",
-                            "parent": {"id": 20, "slug": "a", "name": "A"},
-                        },
-                    ],
-                    "next": None,
-                },
-            }
+            {"/api/dcim/interfaces/": {"results": [{"id": 7, "name": "et-0/0/0"}], "next": None}}
         ),
     )
 
-    listed = await _listed(provider)
+    objects = await _provider(token="netbox-token").list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="read_objects"),
+    )
 
-    assert {"region:a", "region:b"} <= {site.external_id for site in listed}
+    assert [obj.external_id for obj in objects] == ["7"]
+
+
+def _bytes_response(payload: bytes, *, declare_length: bool) -> httpx.Response:
+    """A response that streams ``payload``, with or without a Content-Length header.
+
+    A chunked response declares no length, which is exactly the case a header check
+    cannot decide and the running total has to.
+    """
+    if declare_length:
+        return httpx.Response(200, content=payload)
+    return httpx.Response(
+        200,
+        stream=_ChunkedStream(payload),
+        headers={"content-type": "application/json"},
+    )
+
+
+class _ChunkedStream(httpx.AsyncByteStream):
+    """Hands the body over in small pieces and never declares its length."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    async def __aiter__(self) -> Any:
+        for start in range(0, len(self._payload), 1024):
+            yield self._payload[start : start + 1024]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declare_length", [True, False])
+async def test_a_response_past_the_cap_is_refused_unparsed(
+    monkeypatch: pytest.MonkeyPatch, declare_length: bool
+) -> None:
+    """Valid JSON is still refused once it is too big, declared length or not.
+
+    The payload parses perfectly. Size is the whole objection, so a cap that only
+    rejected malformed bodies would not be this cap.
+    """
+    payload = b'{"results": [' + b'{"id": 1, "name": "x"},' * 20_000 + b'{"id": 2}], "next": null}'
+    assert len(payload) > 128 * 1024
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return _bytes_response(payload, declare_length=declare_length)
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider({"max_response_bytes": 64 * 1024}, token="netbox-token")
+
+    with pytest.raises(InventoryProviderError) as raised:
+        await provider.list_objects(
+            "interface",
+            context=ProviderCallContext(provider_id="netbox:primary", operation="cap-test"),
+        )
+
+    envelope = raised.value.envelope
+    assert envelope.code == ProviderErrorCode.SCHEMA_VALIDATION_FAILED
+    # Not retryable: the same read returns the same oversized body.
+    assert envelope.retryable is False
+    assert envelope.safe_details["max_response_bytes"] == 64 * 1024
+
+
+@pytest.mark.asyncio
+async def test_a_response_under_the_cap_is_read_normally(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cap is a ceiling, not a toll: an ordinary body is unaffected."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [{"id": 7, "name": "eth0"}], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider({"max_response_bytes": 64 * 1024}, token="netbox-token")
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="cap-test"),
+    )
+
+    assert [obj.external_id for obj in objects] == ["7"]
+
+
+@pytest.mark.asyncio
+async def test_a_lying_content_length_does_not_get_past_the_running_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A declared length under the cap decides nothing; the bytes actually read do.
+
+    The header is the sender's claim about itself, so treating it as the check would
+    make the cap advisory for anyone who cared to evade it.
+    """
+    payload = b'{"results": [' + b'{"id": 1, "name": "x"},' * 20_000 + b'{"id": 2}], "next": null}'
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        response = _bytes_response(payload, declare_length=False)
+        response.headers["content-length"] = "128"
+        return response
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider({"max_response_bytes": 64 * 1024}, token="netbox-token")
+
+    with pytest.raises(InventoryProviderError) as raised:
+        await provider.list_objects(
+            "interface",
+            context=ProviderCallContext(provider_id="netbox:primary", operation="cap-test"),
+        )
+
+    assert raised.value.envelope.safe_details["max_response_bytes"] == 64 * 1024
+
+
+@pytest.mark.asyncio
+async def test_a_read_with_no_marker_asks_for_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A first sync has nothing to narrow by, and must not narrow by anything."""
+    captured: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+
+    await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    assert "last_updated__gte" not in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_a_read_with_a_marker_asks_only_for_what_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The marker becomes a NetBox filter, inclusive of its own boundary.
+
+    ``__gte`` rather than ``__gt``: two objects saved in the same instant carry the same
+    timestamp, and excluding the boundary would drop whichever of them the previous read
+    did not reach. Re-reading one costs an upsert that changes nothing.
+    """
+    captured: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    # No grace window here: this pins that the marker itself is the boundary.
+    provider = _provider({"delta_grace_seconds": 0}, token="netbox-token")
+
+    await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="auto_sync",
+            since="2026-09-15T12:00:00.000000Z",
+        ),
+    )
+
+    assert "last_updated__gte=2026-09-15T12%3A00%3A00.000000Z" in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_a_delta_read_starts_a_grace_window_behind_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Five minutes by default, and the marker recorded is still the one observed.
+
+    NetBox stamps ``last_updated`` when a save begins, so a long transaction can carry
+    a stamp older than the marker and commit after the read that recorded it. The read
+    asks from behind the marker to catch that; what the platform carries forward is the
+    true highest value, or the window would creep backwards on every pass.
+    """
+    captured: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "results": [{"id": 7, "name": "eth0", "last_updated": "2026-09-15T12:03:00Z"}],
+                "next": None,
+            },
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+    assert provider.config.delta_grace_seconds == 300
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="auto_sync",
+            since="2026-09-15T12:00:00.000000Z",
+        ),
+    )
+
+    assert "last_updated__gte=2026-09-15T11%3A55%3A00.000000Z" in captured["url"]
+    assert objects[0].source_version["marker"] == "2026-09-15T12:03:00Z"
+
+
+@pytest.mark.parametrize(
+    ("grace", "marker", "expected"),
+    [
+        (300, "2026-09-15T12:00:00.000000Z", "2026-09-15T11:55:00.000000Z"),
+        (90, "2026-09-15T00:00:30Z", "2026-09-14T23:59:00.000000Z"),
+        (60, "2026-09-15T12:00:00+02:00", "2026-09-15T11:59:00+02:00"),
+        (0, "2026-09-15T12:00:00.000000Z", "2026-09-15T12:00:00.000000Z"),
+        # A marker this provider cannot parse is opaque and goes back as it came.
+        (300, "opaque-cursor-17", "opaque-cursor-17"),
+    ],
+)
+def test_the_grace_window_moves_the_boundary_back_in_netboxs_own_spelling(
+    grace: int, marker: str, expected: str
+) -> None:
+    assert _provider({"delta_grace_seconds": grace})._since_with_grace(marker) == expected
+
+
+def test_a_negative_grace_window_is_rejected() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="delta_grace_seconds"):
+        _provider({"delta_grace_seconds": -1})
+
+
+@pytest.mark.asyncio
+async def test_a_marker_narrows_rather_than_replaces_the_configured_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider scoped to part of an estate stays scoped to it when reading a delta.
+
+    Losing the configured filter here would widen a deliberately narrow provider to the
+    whole table on every delta pass, which is the opposite of what delta is for.
+    """
+    captured: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider({"object_queries": {"interface": "mgmt_only=false"}}, token="netbox-token")
+
+    await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(
+            provider_id="netbox:primary", operation="auto_sync", since="2026-09-15T12:00:00Z"
+        ),
+    )
+
+    assert "mgmt_only=false" in captured["url"]
+    assert "last_updated__gte" in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_every_object_carries_the_marker_the_next_delta_read_needs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Filtering by ``since`` and reporting no marker is the one unsafe combination.
+
+    The platform would go on asking for changes since a moment that never advanced, and
+    believe itself up to date while the source moved on.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": 7, "name": "eth0", "last_updated": "2026-09-15T12:00:00.123456Z"},
+                    {"id": 8, "name": "eth1", "last_updated": "2026-09-15T13:00:00.000000Z"},
+                ],
+                "next": None,
+            },
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    assert [obj.source_version["marker"] for obj in objects] == [
+        "2026-09-15T12:00:00.123456Z",
+        "2026-09-15T13:00:00.000000Z",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_record_without_a_timestamp_simply_carries_no_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin model may not stamp last_updated; that is a missing marker, not a crash.
+
+    The platform keeps the highest marker it saw, so a record contributing none just
+    does not raise the watermark -- and will be read again next time, which is right.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [{"id": 7, "name": "eth0"}], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="auto_sync"),
+    )
+
+    assert "marker" not in objects[0].source_version
+
+
+def test_netbox_declares_it_can_answer_what_changed() -> None:
+    """The capability is the promise core checks before asking for a delta at all."""
+    assert Capability.DELTA in _provider().capabilities
+
+
+def test_legacy_filters_migrate_without_widening_and_round_trip() -> None:
+    config = _provider(
+        {
+            "device_query": "tag=managed&status=active&status=offline",
+            "object_queries": {"contact": "group=gondor", "device": "tag=edge&status=active"},
+            "inventory_scopes": [
+                {
+                    "name": "gondor",
+                    "tenant_slug": "gondor",
+                    "tenant_scope_exemptions": ["contact"],
+                    "queries": {"contact": [{"field": "group", "value": "gondor"}]},
+                },
+                {"name": "unused", "tenant_slug": "rohan"},
+            ],
+            "active_inventory_scope": "gondor",
+        }
+    ).config
+    rules = config.inventory_filter.queries
+    assert len(rules["contact"]) == 1
+    assert {r.field: r.value for r in rules["device"]} == {
+        "tag": ["edge", "managed"],
+        "status": "active",
+    }
+    assert config.inventory_filter.tenant_slug == "gondor"
+    assert config.inventory_filter.tenant_scope_exemptions == ["contact"]
+    assert NetBoxProviderConfig.model_validate(config.model_dump(mode="json")) == config
+    for key in ("device_query", "object_queries", "inventory_scopes", "active_inventory_scope"):
+        assert key not in config.model_dump()
+        assert key not in config.model_json_schema()["properties"]
+
+
+@pytest.mark.parametrize(
+    "legacy",
+    [
+        {"inventory_scopes": 42},
+        {"object_queries": {"contact": 42}},
+        {"device_query": ["tag=managed"]},
+        {"device_query": "tenant=rohan", "object_queries": {"device": "tenant=gondor"}},
+        {
+            "inventory_filter": {
+                "queries": {"contact": [{"field": "group", "lookup": "oops", "value": "gondor"}]}
+            },
+            "device_query": "tag=managed",
+        },
+    ],
+)
+def test_invalid_legacy_filters_fail_validation(legacy) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _provider(legacy)
+
+
+@pytest.mark.parametrize(
+    ("kind", "parent", "family"),
+    [
+        ("dcim.interface", "device", "interface"),
+        ("virtualization.vminterface", "virtual_machine", "vm_interface"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_ip_assignment_links_to_interface_and_parent(
+    monkeypatch, kind, parent, family
+) -> None:
+    record = {
+        "id": 9,
+        "address": "10.90.1.12/24",
+        "assigned_object_type": kind,
+        "assigned_object_id": 4,
+        "assigned_object": {
+            "id": 4,
+            "name": "GigabitEthernet1",
+            "display": "GigabitEthernet1",
+            parent: {"id": 7, "name": "mt1-edge-02"},
+        },
+        "_hegemony_interface": {"id": 999},
+        "_hegemony_vm_interface": {"id": 999},
+        "url": "https://netbox.example/api/ipam/ip-addresses/9/",
+    }
+    _install_transport(
+        monkeypatch, httpx.MockTransport(lambda request: httpx.Response(200, json=record))
+    )
+    obj = await _provider({"public_url": "https://inventory.example/netbox/"}).get_object(
+        "ip_address",
+        "9",
+        context=ProviderCallContext(provider_id="netbox:primary", operation="get_object"),
+    )
+    assert obj.attributes[parent] == "mt1-edge-02"
+    edges = {
+        (edge.rel, edge.target_object_type, edge.target_external_id) for edge in obj.relationships
+    }
+    assert (family, family, "4") in edges
+    assert (parent, parent, "7") in edges
+    assert all(edge[2] != "999" for edge in edges)
+    assert (
+        obj.descriptive["provider_url"] == "https://inventory.example/netbox/ipam/ip-addresses/9/"
+    )
+
+
+def test_public_url_preserves_mounts_and_rejects_foreign_links() -> None:
+    provider = _provider(
+        {"url": "http://netbox:8080/internal/", "public_url": "https://inventory.example/netbox/"}
+    )
+    assert (
+        provider._provider_url({"url": "http://netbox:8080/internal/api/ipam/ip-addresses/9/"})
+        == "https://inventory.example/netbox/ipam/ip-addresses/9/"
+    )
+    assert (
+        provider._provider_url({"display_url": "https://untrusted.example/ipam/ip-addresses/9/"})
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_shared_discovery_authenticates_each_connection_and_keeps_custom_fields_private(
+    monkeypatch,
+) -> None:
+    class Cache:
+        def __init__(self):
+            self.schemas = {}
+
+        async def get(self, key):
+            return self.schemas.get(key)
+
+        async def put(self, key, schema):
+            self.schemas[key] = schema
+
+    cache = Cache()
+    schema = json.loads(
+        (pathlib.Path(__file__).parents[1] / "fixtures/netbox-4.3-schema.json").read_text()
+    )
+    seen = []
+
+    def handler(request):
+        auth = request.headers.get("Authorization")
+        seen.append((request.method, request.url.host, request.url.path, auth))
+        if auth == "Bearer denied":
+            return httpx.Response(403, json={"detail": "denied"})
+        if request.url.path == "/api/schema/":
+            # The schema endpoint defaults to a YAML renderer for OPTIONS too.
+            if request.url.params.get("format") != "json":
+                return httpx.Response(
+                    200,
+                    text="name: OpenAPI schema\n",
+                    headers={"Content-Type": "application/vnd.oai.openapi"},
+                )
+            return httpx.Response(200, json=schema if request.method == "GET" else {})
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"name": auth.split()[-1], "type": "text", "object_types": ["dcim.device"]}
+                ],
+                "next": None,
+            },
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+
+    def connection(url, token):
+        provider = _provider(
+            {
+                "url": url,
+                "discovery_url": "https://canonical.example/",
+                "auth_fallback_schemes": [],
+            },
+            token=token,
+        )
+        services: Any = provider._services
+        services.schema_cache = cache
+        return provider
+
+    first, second = (
+        connection("https://first.example", "gondor"),
+        connection("https://second.example", "rohan"),
+    )
+    context = ProviderCallContext(provider_id="netbox:primary", operation="discover_cached")
+    a, b = await first.discover(context=context), await second.discover(context=context)
+    assert first.discovery_cache_key == second.discovery_cache_key
+    assert len([r for r in seen if r[0] == "GET" and r[2] == "/api/schema/"]) == 1
+    assert ("OPTIONS", "canonical.example", "/api/schema/", "Bearer rohan") in seen
+    assert ("GET", "second.example", "/api/extras/custom-fields/", "Bearer rohan") in seen
+    devices_a = next(spec for spec in a.object_types if spec.id == "device")
+    devices_b = next(spec for spec in b.object_types if spec.id == "device")
+    assert devices_a.field_schema != devices_b.field_schema
+    # Rebuilding a connection after editing its filters must also reuse the schema.
+    reconfigured = connection("https://second.example", "rohan")
+    reconfigured.config = reconfigured.config.model_copy(
+        update={"object_queries": {"contact": "group=rohan"}}
+    )
+    await reconfigured.discover(context=context)
+    assert len([r for r in seen if r[0] == "GET" and r[2] == "/api/schema/"]) == 1
+    with pytest.raises(InventoryProviderError) as denied:
+        await connection("https://third.example", "denied").discover(context=context)
+    assert denied.value.envelope.code == ProviderErrorCode.AUTH_FAILED
+    await second.discover(
+        context=ProviderCallContext(provider_id="netbox:primary", operation="discover")
+    )
+    assert len([r for r in seen if r[0] == "GET" and r[2] == "/api/schema/"]) == 2
+    assert (
+        _provider({"url": "https://NETBOX.example:443/"}).discovery_cache_key
+        == _provider().discovery_cache_key
+    )
+    assert (
+        _provider({"url": "https://another.example/"}).discovery_cache_key
+        != _provider().discovery_cache_key
+    )

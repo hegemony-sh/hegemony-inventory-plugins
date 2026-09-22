@@ -147,7 +147,9 @@ def load_git_inventory(
                 model=site,
                 file_path=rel,
             )
-        except (ValueError, ValidationError, yaml.YAMLError) as exc:
+        except ValidationError as exc:
+            errors.append(GitInventoryLoadError(rel, _validation_message(exc)))
+        except (ValueError, yaml.YAMLError) as exc:
             errors.append(GitInventoryLoadError(rel, str(exc)))
 
     errors.extend(_validate_site_hierarchy(sites))
@@ -168,7 +170,9 @@ def load_git_inventory(
             seen_external_ids.add(device.external_id)
             devices.append(device)
             device_files[device.external_id] = rel
-        except (ValueError, ValidationError, yaml.YAMLError) as exc:
+        except ValidationError as exc:
+            errors.append(GitInventoryLoadError(rel, _validation_message(exc)))
+        except (ValueError, yaml.YAMLError) as exc:
             errors.append(GitInventoryLoadError(rel, str(exc)))
 
     if errors:
@@ -244,6 +248,22 @@ def _parent_site_external_id(site_external_id: str) -> str | None:
     if "/" not in site_external_id:
         return None
     return site_external_id.rsplit("/", 1)[0]
+
+
+def _validation_message(exc: ValidationError) -> str:
+    """A schema failure as text that never carries the offending input.
+
+    ``str(exc)`` renders every error with ``input_value=...``, so a mistyped key holding
+    a literal credential would travel into the error envelope and from there to the UI
+    and the logs. The message is built from each error's location and type only;
+    ``include_url`` strips nothing but documentation links, and the pydantic ``msg`` is
+    left out because a validator's own wording is free to quote what it was given.
+    """
+    parts: list[str] = []
+    for error in exc.errors(include_url=False, include_input=False):
+        location = ".".join(str(item) for item in error.get("loc", ())) or "document"
+        parts.append(f"{location} ({error.get('type', 'invalid')})")
+    return "Schema validation failed: " + "; ".join(parts)
 
 
 def _validate_file(path: Path, *, max_file_bytes: int) -> None:

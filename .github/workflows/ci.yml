@@ -70,6 +70,9 @@ jobs:
       - name: Type check
         run: uv run ty check
 
+      - name: Verify the generated NetBox catalogue is current
+        run: uv run python scripts/generate_catalogue.py --check
+
       - name: Run tests
         run: uv run pytest -v --tb=short
 

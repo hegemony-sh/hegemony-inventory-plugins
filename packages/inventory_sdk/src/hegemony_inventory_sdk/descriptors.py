@@ -11,12 +11,16 @@ remain first-class and are bridged onto the generic store by the platform.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from .enums import MaintenanceState, ResourceType
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle: mapping.py reads this module
+    from .mapping import ObjectFieldMapping
 
 AccessConfig = dict[str, Any]
 
@@ -37,6 +41,41 @@ class ProviderCallContext:
     query_hash: str | None = None
     config_version: int | None = None
     source_version: dict[str, Any] = field(default_factory=dict)
+    #: How to read the family being asked for, when the platform knows and the provider
+    #: might not.
+    #:
+    #: An object type a provider *discovered* is not in the catalogue it shipped -- that
+    #: is the whole point of discovering it -- so a later call cannot look up how to map
+    #: it. A provider is built fresh for every operation and cannot remember either. The
+    #: platform stored the mapping discovery returned, and hands it back here.
+    #:
+    #: ``None`` means the provider is on its own, which is the case for every family it
+    #: declared itself and for every provider that does not discover at all.
+    object_mapping: ObjectFieldMapping | None = None
+    #: Return only what changed at or after this marker, if the provider can.
+    #:
+    #: The value is one the provider itself produced, in an earlier call, as a
+    #: descriptor's ``source_version["marker"]``; the platform kept the highest it saw
+    #: and hands it back. It is opaque here on purpose -- a NetBox timestamp, an
+    #: increasing revision, an opaque cursor -- because only the source knows how its own
+    #: ordering works.
+    #:
+    #: ``None`` means read everything, which is what a first sync does, what a provider
+    #: without :attr:`~.enums.Capability.DELTA` always does, and what the platform falls
+    #: back to on a schedule so that deletions are noticed.
+    #:
+    #: **At or after, not strictly after.** Two records can carry the same marker, so
+    #: excluding the boundary would drop whichever of them the last read did not reach.
+    #: Returning one record twice costs an upsert that changes nothing; missing one
+    #: leaves the platform wrong until the next full pass.
+    since: str | None = None
+    #: Filters the instance advertised for this object family, as JSON Schema.
+    #:
+    #: Kept with the per-family call metadata for the same reason as ``object_mapping``:
+    #: a family discovered from one instance may not exist in the provider's shipped
+    #: catalogue, and a fresh provider has nowhere else to recover its query contract.
+    #: Appended to preserve positional construction of the older context fields.
+    object_query_schema: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +100,18 @@ class ObjectDescriptor:
     descriptive: dict[str, Any] = field(default_factory=dict)
     access_config: AccessConfig = field(default_factory=dict)
     relationships: tuple[ObjectRelationship, ...] = ()
+    #: Where this record stood in the source's own ordering when it was read.
+    #:
+    #: A provider that declares :attr:`~.enums.Capability.DELTA` puts a ``"marker"`` key
+    #: here -- NetBox uses its ``last_updated`` -- and the platform keeps the highest
+    #: marker it saw across the whole listing, then hands it back as
+    #: :attr:`ProviderCallContext.since` next time.
+    #:
+    #: The platform never parses it. It compares markers as strings and keeps the
+    #: greatest, which is correct for any format that sorts lexicographically in its own
+    #: order -- an ISO-8601 timestamp does, a zero-padded revision does. A provider whose
+    #: markers do not should not declare the capability, because the platform has no way
+    #: to tell.
     source_version: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -102,9 +153,7 @@ class DeviceDescriptor:
     # Optional: providers emit the source management port or leave it unset; the core
     # inventory service fills the default (DEFAULT_DEVICE_MGMT_PORT) on materialization.
     mgmt_port: int | None = None
-    vendor: str | None = None
-    model: str | None = None
-    current_version: str | None = None
+    attributes: dict[str, Any] = field(default_factory=dict)
     site: SiteRef | None = None
     role: str | None = None
     tags: dict[str, str] = field(default_factory=dict)
@@ -160,13 +209,11 @@ def device_to_object_descriptor(device: DeviceDescriptor) -> ObjectDescriptor:
             ),
         )
     attributes: dict[str, Any] = {
+        **device.attributes,
         "mgmt_host": device.mgmt_host,
         "mgmt_port": device.mgmt_port,
         "platform": device.platform,
         "hostname": device.hostname,
-        "vendor": device.vendor,
-        "model": device.model,
-        "current_version": device.current_version,
         "role": device.role,
         "tags": dict(device.tags),
         "native_tags": list(device.native_tags),

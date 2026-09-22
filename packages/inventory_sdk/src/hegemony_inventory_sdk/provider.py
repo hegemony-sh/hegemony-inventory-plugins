@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import builtins
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from typing import Any
 
 from .descriptors import (
@@ -29,6 +29,7 @@ from .descriptors import (
     device_to_object_descriptor,
     site_to_object_descriptor,
 )
+from .discovery import DiscoveryResult, ProjectionBinding
 from .enums import Capability, ResourceType
 from .errors import not_supported
 
@@ -146,6 +147,51 @@ class InventoryProvider(ABC):
             getattr(self, "provider_type", "unknown"),
             f"get_object:{object_type}",
         )
+
+    async def iter_object_pages(
+        self,
+        object_type: str,
+        query: Mapping[str, Any] | None = None,
+        *,
+        context: ProviderCallContext,
+    ) -> AsyncIterator[builtins.list[ObjectDescriptor]]:
+        """Yield complete provider pages without buffering a family in core.
+
+        Existing providers remain compatible: the default yields their ordinary
+        list_objects result once. Large providers should override this method.
+        """
+        yield await self.list_objects(object_type, query, context=context)
+
+    # ── Optional capabilities ──
+
+    async def discover(self, *, context: ProviderCallContext) -> DiscoveryResult:
+        """Describe the object types *this instance* serves.
+
+        A provider type's object types are declared once, at registration, and are the
+        same for every instance of it. That is right for a source of truth with a fixed
+        shape and wrong for one that can be extended: a NetBox with plugins installed
+        serves models this plugin has never heard of, and every instance has its own
+        custom fields.
+
+        A provider declaring :attr:`~.enums.Capability.DISCOVER` implements this to let
+        the platform ask. The default raises ``not_supported``, so a provider whose shape
+        really is fixed needs no change and behaves exactly as before.
+
+        Expensive by nature -- it describes a whole API rather than reading one object --
+        so the platform calls it on demand and stores the answer, rather than per sync.
+        """
+        raise not_supported(self.id, self.provider_type, "discover")
+
+    def configured_projection_bindings(
+        self, object_types: Iterable[str]
+    ) -> tuple[ProjectionBinding, ...] | None:
+        """Rebuild discovered projection bindings from current mutable configuration.
+
+        Discovery still decides which object families this instance serves. Override
+        this when ordinary provider settings influence how those families project at
+        sync time. Returning None keeps the bindings stored during discovery.
+        """
+        return None
 
     # ── Optional future capabilities ──
 
