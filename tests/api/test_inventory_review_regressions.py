@@ -102,12 +102,23 @@ def test_discovered_tenant_field_does_not_invent_a_tenant_filter():
     assert not p._tenant_scope_allows(plan), entry.spec.query_schema
 
 
-def test_raw_token_is_not_accepted_and_exported_as_safe_config():
+def test_a_raw_token_literal_is_rejected_at_validation():
     with pytest.raises(ValidationError):
-        config = NetBoxProviderConfig.model_validate(
+        NetBoxProviderConfig.model_validate(
             {"url": "https://netbox.example", "token_ref": "raw-token-example"}
         )
-        assert config.safe_config()["token_ref"] == "raw-token-example"
+
+
+def test_safe_config_exports_a_valid_reference_and_never_a_literal():
+    reference = "{{ secret('vault://netbox/token') }}"
+    config = NetBoxProviderConfig.model_validate(
+        {"url": "https://netbox.example", "token_ref": reference}
+    )
+
+    exported = config.safe_config()
+
+    assert exported["token_ref"] == reference
+    assert "raw-token-example" not in json.dumps(exported)
 
 
 def test_scope_rejects_an_unadvertised_tenant_lookup():
