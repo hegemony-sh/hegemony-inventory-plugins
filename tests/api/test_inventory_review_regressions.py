@@ -145,12 +145,139 @@ def test_scope_rejects_an_unadvertised_tenant_lookup():
         ("tenant=a&tenant=b", "tenant=b&tenant=c", "tenant=b"),
         ("tag=managed", "tag=core", "tag=managed&tag=core"),
         ("status=active&status=planned", "", "status=active&status=planned"),
+        # A positive lookup still narrows: what both allow is the common value.
+        ("status=active&status=planned", "status=planned", "status=planned"),
+        # Negated lookups: NetBox excludes every listed value, so requiring both
+        # exclusions is the union. Intersecting these re-admitted planned devices.
+        (
+            "status__n=offline&status__n=planned",
+            "status__n=offline",
+            "status__n=offline&status__n=planned",
+        ),
+        ("status__n=offline", "status__n=planned", "status__n=offline&status__n=planned"),
+        ("name__nic=lab", "name__nic=test", "name__nic=lab&name__nic=test"),
+        ("tag__n=lab", "tag__n=test", "tag__n=lab&tag__n=test"),
+        # Bounds: repeated values OR, so each side is its loosest; both require the tighter.
+        ("id__gte=5", "id__gte=10", "id__gte=10"),
+        ("id__gte=5&id__gte=10", "id__gte=7", "id__gte=7"),
+        ("id__lte=20", "id__lte=30", "id__lte=20"),
+        ("id__lt=20", "id__lt=15", "id__lt=15"),
+        # Strict and inclusive are distinct parameters, which NetBox already ANDs.
+        ("id__gt=5", "id__gte=5", "id__gt=5&id__gte=5"),
+        (
+            "last_updated__gte=2026-09-15T12:00:00Z",
+            "last_updated__gte=2026-09-15T11:00:00.000000Z",
+            "last_updated__gte=2026-09-15T12%3A00%3A00Z",
+        ),
+        # Pattern lookups: expressible only when one side is a subset of the other.
+        ("name__ic=core", "name__ic=core", "name__ic=core"),
+        ("name__ic=core&name__ic=edge", "name__ic=core", "name__ic=core"),
+        # tag__any is NetBox's OR spelling of the tag filter, so it intersects.
+        ("tag__any=a&tag__any=b", "tag__any=b", "tag__any=b"),
     ],
 )
 def test_independent_scope_constraints_intersect(baseline, caller, expected):
     from hegemony_inventory_netbox.provider import _intersect_queries
 
     assert _intersect_queries(baseline, caller) == expected
+
+
+@pytest.mark.parametrize(
+    "baseline,caller,message",
+    [
+        ("status=active", "status=planned", "Conflicting"),
+        ("tag__any=a", "tag__any=b", "Conflicting"),
+        ("name__ic=core", "name__ic=edge", "cannot require two independent name__ic"),
+        ("name__isw=core&name__isw=edge", "name__isw=core&name__isw=dist", "cannot require"),
+        ("id__gte=5", "id__gte=five", "cannot be compared"),
+        ("id__gte=5", "id__gte=2026-01-01", "cannot be compared"),
+    ],
+)
+def test_a_conjunction_netbox_cannot_express_is_refused_rather_than_widened(
+    baseline, caller, message
+):
+    from hegemony_inventory_netbox.provider import _intersect_queries
+
+    with pytest.raises(ValueError, match=message):
+        _intersect_queries(baseline, caller)
+
+
+def test_legacy_migration_conjoins_by_lookup_family_rather_than_intersecting():
+    """The migration folds raw ``device_query`` and ``object_queries`` through the same
+    table, so a negated exclusion accumulates and a bound tightens instead of widening."""
+    config = NetBoxProviderConfig.model_validate(
+        {
+            "url": "https://netbox.example",
+            "token_ref": "{{ env('NETBOX_TOKEN') }}",
+            "device_query": "status__n=offline&status__n=planned&id__gte=5",
+            "object_queries": {"device": "status__n=offline&id__gte=10&role=router"},
+            "inventory_scopes": [
+                {
+                    "name": "scope",
+                    "queries": {
+                        "device": [
+                            {"field": "status", "lookup": "not", "value": "staged"},
+                            {"field": "role", "lookup": "exact", "value": ["router", "switch"]},
+                        ]
+                    },
+                }
+            ],
+            "active_inventory_scope": "scope",
+        }
+    )
+
+    rules = {rule.field: rule for rule in config.inventory_filter.queries["device"]}
+
+    assert rules["status__n"].value == ["offline", "planned", "staged"]
+    assert rules["id__gte"].value == "10"
+    assert rules["role"].value == "router"
+    assert {name: rule.schema_validation for name, rule in rules.items()} == {
+        "status__n": "legacy",
+        "id__gte": "legacy",
+        "role": "legacy",
+    }
+
+
+@pytest.mark.asyncio
+async def test_request_construction_conjoins_scope_and_caller_by_lookup_family(monkeypatch):
+    """The same table governs every read: a caller's negation widens nothing, a caller's
+    bound only tightens, and a positive lookup still narrows to the common value."""
+    provider = NetBoxInventoryProvider(
+        provider_id="netbox:review",
+        services=FakePlatformServices(),
+        config={
+            "url": "https://netbox.example",
+            "token_ref": "{{ env('NETBOX_TOKEN') }}",
+            "inventory_filter": {
+                "queries": {
+                    "device": [
+                        {"field": "status", "lookup": "not", "value": ["offline", "planned"]},
+                        {"field": "id", "lookup": "gte", "value": "5"},
+                        {"field": "role", "lookup": "exact", "value": ["router", "switch"]},
+                    ]
+                }
+            },
+        },
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "status__n": {"type": "string"},
+            "id__gte": {"type": "integer"},
+            "role": {"type": "string"},
+        },
+    }
+    ctx = ProviderCallContext(
+        provider_id=provider.id, operation="review", object_query_schema=schema
+    )
+    plan = provider._fetch_plan("device", ctx)
+    assert plan is not None
+
+    path = provider._object_path(plan, "status__n=offline&id__gte=10&role=router")
+
+    assert path == ("/api/dcim/devices/?status__n=offline&status__n=planned&id__gte=10&role=router")
+    with pytest.raises(ValueError, match="Conflicting"):
+        provider._object_path(plan, "role=firewall")
 
 
 @pytest.mark.parametrize(

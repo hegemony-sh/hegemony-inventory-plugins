@@ -251,6 +251,14 @@ records outside the new filter stale. Configure each Hegemony organization's pro
 with its own tenant slug and preferably its own least-privilege NetBox token. Filters are
 a synchronization boundary; NetBox permissions provide the authorization boundary.
 
+How two independent restrictions on the *same* parameter are combined follows the
+parameter's lookup family, because that is what decides what NetBox makes of repeated
+values: a positive lookup (`status=`) is an OR list, so the rules intersect to the common
+values; a negated lookup (`status__n=`, `name__nic=`) excludes every listed value, so the
+rules accumulate; a bound (`id__gte=`, `last_updated__lt=`) keeps the tighter one; a
+pattern lookup (`name__ic=`) cannot require two different patterns in one request and is
+refused rather than widened. Tags stay AND.
+
 Existing `device_query`, `object_queries` and the active legacy `inventory_scopes` entry
 are converted into this single visible rule set during validation. Inactive presets are
 retired. Saving persists the normalized configuration. Legacy raw parameters remain usable
