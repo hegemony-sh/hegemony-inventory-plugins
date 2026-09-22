@@ -1662,7 +1662,8 @@ async def test_a_read_with_a_marker_asks_only_for_what_changed(
         return httpx.Response(200, json={"results": [], "next": None})
 
     _install_transport(monkeypatch, httpx.MockTransport(handler))
-    provider = _provider(token="netbox-token")
+    # No grace window here: this pins that the marker itself is the boundary.
+    provider = _provider({"delta_grace_seconds": 0}, token="netbox-token")
 
     await provider.list_objects(
         "interface",
@@ -1674,6 +1675,70 @@ async def test_a_read_with_a_marker_asks_only_for_what_changed(
     )
 
     assert "last_updated__gte=2026-09-15T12%3A00%3A00.000000Z" in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_a_delta_read_starts_a_grace_window_behind_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Five minutes by default, and the marker recorded is still the one observed.
+
+    NetBox stamps ``last_updated`` when a save begins, so a long transaction can carry
+    a stamp older than the marker and commit after the read that recorded it. The read
+    asks from behind the marker to catch that; what the platform carries forward is the
+    true highest value, or the window would creep backwards on every pass.
+    """
+    captured: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "results": [{"id": 7, "name": "eth0", "last_updated": "2026-09-15T12:03:00Z"}],
+                "next": None,
+            },
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider(token="netbox-token")
+    assert provider.config.delta_grace_seconds == 300
+
+    objects = await provider.list_objects(
+        "interface",
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="auto_sync",
+            since="2026-09-15T12:00:00.000000Z",
+        ),
+    )
+
+    assert "last_updated__gte=2026-09-15T11%3A55%3A00.000000Z" in captured["url"]
+    assert objects[0].source_version["marker"] == "2026-09-15T12:03:00Z"
+
+
+@pytest.mark.parametrize(
+    ("grace", "marker", "expected"),
+    [
+        (300, "2026-09-15T12:00:00.000000Z", "2026-09-15T11:55:00.000000Z"),
+        (90, "2026-09-15T00:00:30Z", "2026-09-14T23:59:00.000000Z"),
+        (60, "2026-09-15T12:00:00+02:00", "2026-09-15T11:59:00+02:00"),
+        (0, "2026-09-15T12:00:00.000000Z", "2026-09-15T12:00:00.000000Z"),
+        # A marker this provider cannot parse is opaque and goes back as it came.
+        (300, "opaque-cursor-17", "opaque-cursor-17"),
+    ],
+)
+def test_the_grace_window_moves_the_boundary_back_in_netboxs_own_spelling(
+    grace: int, marker: str, expected: str
+) -> None:
+    assert _provider({"delta_grace_seconds": grace})._since_with_grace(marker) == expected
+
+
+def test_a_negative_grace_window_is_rejected() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="delta_grace_seconds"):
+        _provider({"delta_grace_seconds": -1})
 
 
 @pytest.mark.asyncio

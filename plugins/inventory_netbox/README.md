@@ -44,10 +44,20 @@ rendered automatically and `token_ref` gets a secret picker.
 | `public_url` | no | connection URL | Browser-accessible NetBox base URL used for source links |
 | `discovery_url` | no | connection URL | Canonical NetBox base URL for shared schema discovery when connections use aliases |
 | `page_size` | no | `100` | Records requested per NetBox API page (1–1000) |
+| `delta_grace_seconds` | no | `300` | How far behind the recorded marker a delta read starts (non-negative). See [Reading only what changed](#reading-only-what-changed) |
 | `timeout_seconds` | no | `10` | Per-request timeout |
 | `max_response_bytes` | no | `67108864` | Largest response body this provider will read. A timeout bounds how *long* a read may take; this bounds how *much* it may return, which is a different failure — a source answering steadily and forever never goes quiet. Generous by default because `/api/schema/` really is several megabytes. |
 
-**Reading only what changed.** This provider declares the `delta` capability: NetBox stamps `last_updated` on every object and filters on it, so when Hegemony hands back a marker the read becomes `?last_updated__gte=...`. `__gte` rather than `__gt` on purpose — two objects saved in the same instant share a timestamp, and excluding the boundary would drop whichever of them the previous read did not reach. The configured `inventory_filter` still applies, so a deliberately narrow provider stays narrow on a delta pass. Enabling it is the platform's setting, not this plugin's.
+### Reading only what changed
+
+This provider declares the `delta` capability: NetBox stamps `last_updated` on every object and filters on it, so when Hegemony hands back a marker the read becomes `?last_updated__gte=...`. `__gte` rather than `__gt` on purpose — two objects saved in the same instant share a timestamp, and excluding the boundary would drop whichever of them the previous read did not reach. The configured `inventory_filter` still applies, so a deliberately narrow provider stays narrow on a delta pass. Enabling it is the platform's setting, not this plugin's.
+
+**What a delta read cannot see.** The marker is the object's *own* `last_updated`, and two kinds of change do not move it:
+
+- **A nested object's edit.** Projected device facts come from objects nested in the device — the primary IP's address, the site's, platform's or region's name — and editing one of those bumps *its* `last_updated`, not the device's. The device is absent from the next delta listing and the platform keeps the old value. This is a limitation of keying on the device's timestamp, and nothing in a delta read corrects it.
+- **A long transaction.** NetBox takes the stamp when a save begins, so a transaction that stamps `last_updated` before the marker and commits after the read that recorded it is missed by the next delta read.
+
+`delta_grace_seconds` (default 300) handles the second case: the read asks for `last_updated__gte=<marker − grace>` while the marker Hegemony records stays the true highest value seen, so the tail of the previous pass is re-read at the cost of a few upserts that change nothing. Delta is opt-in, and the platform's periodic full reconciliation is what bounds how stale a nested fact can get — size that interval for how long an unnoticed IP or site change is tolerable.
 
 Minimal config:
 

@@ -13,6 +13,7 @@ import json
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any, cast
 from urllib.parse import ParseResult, quote, urlencode, urljoin, urlparse
@@ -390,8 +391,32 @@ class NetBoxInventoryProvider(InventoryProvider):
         """
         if not context.since:
             return expr
-        clause = f"last_updated__gte={quote(context.since, safe='')}"
+        clause = f"last_updated__gte={quote(self._since_with_grace(context.since), safe='')}"
         return f"{expr}&{clause}" if expr else clause
+
+    def _since_with_grace(self, marker: str) -> str:
+        """The marker moved back by ``delta_grace_seconds``, in NetBox's own spelling.
+
+        ``last_updated`` is stamped when a save begins, not when its transaction
+        commits, so a long transaction can carry a stamp older than the marker the
+        previous pass recorded and still be invisible to that pass. Re-reading the tail
+        of the previous pass costs a few upserts that change nothing and catches those.
+        The marker the platform records stays the true highest value seen; only the
+        boundary the next read asks for moves. A marker this provider cannot parse --
+        it is opaque to the platform by contract -- is handed back as it was rather than
+        dropped, which would turn a delta into a full read without saying so.
+        """
+        grace = self.config.delta_grace_seconds
+        if not grace:
+            return marker
+        try:
+            stamp = datetime.fromisoformat(marker)
+        except ValueError:
+            return marker
+        earlier = stamp - timedelta(seconds=grace)
+        if stamp.tzinfo is not None and marker.endswith("Z"):
+            return earlier.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        return earlier.isoformat()
 
     @staticmethod
     def _with_marker(descriptor: ObjectDescriptor, item: Mapping[str, Any]) -> ObjectDescriptor:

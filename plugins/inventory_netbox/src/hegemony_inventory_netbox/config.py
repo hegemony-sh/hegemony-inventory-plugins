@@ -281,6 +281,21 @@ class NetBoxProviderConfig(BaseModel):
         le=1000,
         description="Number of NetBox records requested per API page.",
     )
+    delta_grace_seconds: int = Field(
+        300,
+        ge=0,
+        description=(
+            "How far behind the recorded marker a delta read starts, in seconds. A delta "
+            "read asks NetBox for objects whose last_updated is at or after the highest "
+            "marker the previous pass saw, and a change can slip past that boundary: a "
+            "long transaction takes its timestamp before the marker and commits after "
+            "the read. The grace window re-reads the tail of the previous pass to catch "
+            "it, at the cost of a few upserts that change nothing. It cannot catch an "
+            "edit to a nested object (a primary IP, a site, a platform) that does not "
+            "bump the device carrying it; the scheduled full reconciliation bounds that. "
+            "The marker itself is recorded as observed; only the request moves back."
+        ),
+    )
     timeout_seconds: float = Field(10.0, gt=0, le=120)
     max_response_bytes: int = Field(
         64 * 1024 * 1024,
