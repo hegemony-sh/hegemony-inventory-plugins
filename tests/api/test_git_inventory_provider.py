@@ -125,6 +125,57 @@ def test_git_inventory_loader_rejects_unknown_site_parent(tmp_path: Path) -> Non
     assert [error.message for error in result.errors] == ["Unknown parent site: emea"]
 
 
+@pytest.mark.parametrize(
+    ("relative_path", "document"),
+    [
+        (
+            "devices/edge-01.yaml",
+            """
+            schema_version: 1
+            kind: device
+            external_id: edge-01
+            name: edge-01
+            mgmt_host: 192.0.2.10
+            ssh_password: {secret}
+            vendor: Cisco
+            """,
+        ),
+        (
+            "sites/ams01.yaml",
+            """
+            schema_version: 1
+            kind: site
+            external_id: ams01
+            name: Amsterdam
+            api_token: {secret}
+            """,
+        ),
+    ],
+)
+def test_git_inventory_loader_never_echoes_a_mistyped_secret_into_the_error(
+    tmp_path: Path, relative_path: str, document: str
+) -> None:
+    """A key the schema rejects may hold a literal credential; the error must not carry it.
+
+    pydantic's ``str(exc)`` renders every error with ``input_value=...``, so a stray
+    ``ssh_password: hunter2`` in a device file would reach the UI and the logs through
+    the load error envelope. The message names the location and the kind of error and
+    nothing else -- and the old top-level ``vendor`` key stays rejected.
+    """
+    secret = "s3cr3t-literal-hunter2"
+    _write_yaml(tmp_path / "inventory" / relative_path, document.format(secret=secret))
+
+    result = load_git_inventory(tmp_path, "inventory")
+
+    assert [error.file_path for error in result.errors] == [f"inventory/{relative_path}"]
+    message = result.errors[0].message
+    assert secret not in message
+    assert "input_value" not in message
+    assert "extra_forbidden" in message
+    for key in ("ssh_password", "vendor") if "device" in relative_path else ("api_token",):
+        assert key in message
+
+
 def test_git_inventory_loader_allows_duplicate_local_site_external_ids_in_different_paths(
     tmp_path: Path,
 ) -> None:
