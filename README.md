@@ -11,8 +11,8 @@ Standalone release repo for Hegemony inventory plugin packages:
 - `hegemony-inventory-netbox`
 - `hegemony-inventory-git`
 
-The SDK and all provider wheels are released together from unified semver tags such as
-`v0.1.0`. Provider wheels depend on the exact SDK version from the same release.
+The SDK and all provider wheels are released together under one semver tag such as
+`v0.1.0`, cut automatically when a releasable change merges to `main`. Provider wheels depend on the exact SDK version from the same release.
 
 Public source is licensed under `AGPL-3.0-or-later`; commercial licenses may be
 available separately. See [Licensing](LICENSING.md).
@@ -124,21 +124,7 @@ Run every configured pre-commit hook manually:
 task precommit
 ```
 
-Before tagging a release, update every package version and provider SDK pin:
-
-```bash
-task version:set -- 0.1.0
-task lock
-```
-
-Tags must match package metadata. A `v0.1.0` tag publishes three wheels plus
-`SHA256SUMS` to the matching GitHub Release.
-
-Releases are intended to be immutable: the release workflow fails if a GitHub
-Release for the tag already exists and never replaces published assets. If a
-release artifact is wrong, cut a new patch tag instead of mutating the existing
-release. The release workflow also
-creates GitHub artifact attestations for the wheel files and checksum file,
-but only for public releases: attestation needs a public repository or an
-Enterprise plan, so releases cut while this repository is private ship
-checksums only.
+Releases are cut automatically when a releasable change merges to `main`; see
+[Contributing](CONTRIBUTING.md#releasing). Do not bump versions or push tags by
+hand. `task version:set -- X.Y.Z` and `task version:verify -- vX.Y.Z` stay
+available for trying the lockstep bump locally.

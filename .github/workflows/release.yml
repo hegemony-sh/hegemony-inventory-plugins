@@ -2,96 +2,48 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-name: Release Wheels
+# A merge to main is a release. The shared workflow runs semantic-release,
+# which reads the Conventional Commits since the last tag and decides whether
+# there is anything to release; .releaserc.json in this repository holds the
+# version bump, wheel build and asset list. There is no tag to push by hand.
+
+name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+  # Re-run without a push: after adding RELEASE_TOKEN, or when a run failed
+  # after the merge. semantic-release decides from the commits whether there
+  # is anything to release, so a dispatch on an already released tip is a
+  # no-op rather than a duplicate.
+  workflow_dispatch:
 
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
-
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
-
-env:
-  PYTHON_VERSION: "3.12"
+permissions: {}
 
 jobs:
   release:
-    name: Build And Publish Wheel Assets
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7
-        with:
-          version: "0.9.28"
-          enable-cache: false
-
-      - name: Install dependencies
-        run: uv sync --frozen --all-packages
-
-      - name: Verify tag matches package versions
-        run: uv run python scripts/verify_release_version.py "${GITHUB_REF_NAME}"
-
-      - name: Verify release does not already exist
-        run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            echo "::error::Release ${GITHUB_REF_NAME} already exists; releases are immutable."
-            exit 1
-          fi
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Run tests
-        run: uv run pytest -v --tb=short
-
-      - name: Build wheels
-        run: uv run python scripts/build_wheels.py
-
-      - name: Smoke install wheels
-        run: uv run python scripts/smoke_install_wheels.py
-
-      - name: Generate checksums
-        run: sha256sum dist/*.whl > SHA256SUMS
-
-      # Artifact attestations need a public repository or an Enterprise
-      # plan, so they are unavailable while the repos are private pre-launch
-      # — an ungated step fails the whole release run. This gate tests
-      # visibility only, so attestation switches back on by itself the moment
-      # the repository goes public and there is nothing to revert at launch;
-      # an Enterprise plan taken while still private would need the condition
-      # relaxed by hand. Both visibility sources are consulted so that one of
-      # them being absent for a given trigger cannot leave attestation
-      # silently off after launch.
-      - name: Attest release asset provenance
-        if: >-
-          github.repository_visibility == 'public'
-          || github.event.repository.visibility == 'public'
-        uses: actions/attest@281a49d4cbb0a72c9575a50d18f6deb515a11deb # v4
-        with:
-          subject-path: |
-            dist/*.whl
-            SHA256SUMS
-
-      - name: Publish GitHub Release assets
-        run: |
-          gh release create "${GITHUB_REF_NAME}" dist/*.whl SHA256SUMS \
-            --title "${GITHUB_REF_NAME}" \
-            --notes "Hegemony inventory SDK and provider plugin wheels for ${GITHUB_REF_NAME}." \
-            --verify-tag
-        env:
-          GH_TOKEN: ${{ github.token }}
+    name: Release
+    # Belt and braces: GitHub already skips push runs whose head commit says
+    # [skip ci], which the release commit semantic-release pushes does.
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    # Pinned to a commit, never a branch: the called workflow receives
+    # RELEASE_TOKEN and this job's write permission, so what runs must be the
+    # reviewed code. The comment names the branch the pin was taken from; bump
+    # the SHA in a pull request to pick up a change merged there (the
+    # workflow's own release-tools lockfile moves with it).
+    uses: hegemony-sh/hegemony-workflows/.github/workflows/plugin-release.yml@f1880aea2e70fd3c7a5a03320067caf102066677 # main
+    # The union of what the called workflow's jobs need; it narrows per job
+    # (contents: write for the release; id-token, attestations and
+    # artifact-metadata for the provenance attestation of public releases).
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    # Explicit mapping rather than `secrets: inherit`: the called workflow
+    # needs exactly one secret, and naming it keeps every other secret this
+    # repository holds, now or later, out of a workflow it does not own.
+    # RELEASE_TOKEN is a repository or organization secret; the called
+    # workflow fails fast with a clear message when it arrives empty.
+    secrets:
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
