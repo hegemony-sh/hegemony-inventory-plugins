@@ -8,3 +8,30 @@ path = "uv.lock"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2025-2026 Jakub Travnik <jakub.travnik@gmail.com>"
 SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+# Recorded NetBox API interface data.
+#
+# tests/fixtures/*-schema.json is a NetBox OpenAPI document produced by that NetBox and
+# reduced by scripts/trim_netbox_schema.py to the collection endpoints and component
+# schemas the deriver reads. The trimmer drops every description, title and example, so
+# what remains is interface data -- paths, property names, types, choice values -- and
+# none of NetBox's own prose. It is recorded rather than written, which is what makes
+# the conformance test in tests/api/test_netbox_derive.py mean anything.
+[[annotations]]
+path = "tests/fixtures/**.json"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2025-2026 Jakub Travnik <jakub.travnik@gmail.com>"
+SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+# JSON config files (no comment syntax) and the changelog semantic-release
+# rewrites on every release: a header at its top would be pushed below the
+# newest entry.
+[[annotations]]
+path = [
+    ".releaserc.json",
+    ".github/renovate.json",
+    "CHANGELOG.md",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2025-2026 Jakub Travnik <jakub.travnik@gmail.com>"
+SPDX-License-Identifier = "AGPL-3.0-or-later"

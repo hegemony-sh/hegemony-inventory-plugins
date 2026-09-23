@@ -24,7 +24,7 @@ commands, checksum verification, and local-wheel development installs.
 
 ## How it works
 
-Unlike NetBox/Infrahub, the Git provider does not talk to an external API directly. You
+The Git provider reads inventory files from a Git checkout. You
 first register a **Git repository** under *Settings → Git Repositories* (URL + branch +
 credentials), and the Git inventory provider then points at a directory **inside** that
 repository. The repository fetch, credentials, caching, and SSRF protection are all handled
@@ -43,7 +43,6 @@ of the Git repositories you have added.
 | `path` | yes | — | Repo-relative path to the **inventory directory** (the one containing `sites/` and `devices/`) |
 | `default_access_config` | no | `{}` | Access-config defaults applied to every device |
 | `refresh_strategy` | no | `cache_ttl` | Cache strategy (currently the only value) |
-| `query_cache_ttl_seconds` | no | `null` | Optional query cache TTL (0–86400 s) |
 
 Example config:
 
@@ -121,8 +120,7 @@ path, so those values are **not** written into the YAML.
 | `mgmt_host` | yes | — | management IP or hostname |
 | `mgmt_port` | no | (core default) | omit to let the core inventory service fill its default (22); range 1–65535 |
 | `platform` | no | (core default) | omit to let the core inventory service fill its default |
-| `vendor` | no | — | |
-| `model` | no | — | |
+| `attributes` | no | `{}` | Inventory facts, e.g. `vendor`, `model`, and `current_version` |
 | `site` | no | — | full derived site path, for example `emea/nl/ams01` |
 | `role` | no | — | |
 | `tags` | no | `[]` | list of strings |

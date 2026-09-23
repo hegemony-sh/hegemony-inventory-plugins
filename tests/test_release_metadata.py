@@ -17,7 +17,6 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_PYPROJECTS = [
     ROOT / "packages" / "inventory_sdk" / "pyproject.toml",
     ROOT / "plugins" / "inventory_netbox" / "pyproject.toml",
-    ROOT / "plugins" / "inventory_infrahub" / "pyproject.toml",
     ROOT / "plugins" / "inventory_git" / "pyproject.toml",
 ]
 PROVIDER_PYPROJECTS = PACKAGE_PYPROJECTS[1:]
@@ -67,10 +66,10 @@ def test_inventory_plugin_entry_points_are_declared() -> None:
     entries = entry_points(group="hegemony.inventory_plugins")
     by_name = {entry.name: entry for entry in entries}
 
-    assert {"netbox", "infrahub", "git"} <= set(by_name)
+    assert {"netbox", "git"} <= set(by_name)
     registry = RecordingRegistry()
-    for name in ("netbox", "infrahub", "git"):
+    for name in ("netbox", "git"):
         by_name[name].load()(registry)
 
-    assert set(registry.providers) == {"netbox", "infrahub", "git"}
+    assert set(registry.providers) == {"netbox", "git"}
     assert {"ip_prefix", "ip_address", "vlan"} <= set(registry.object_types)

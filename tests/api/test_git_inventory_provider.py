@@ -17,6 +17,7 @@ from hegemony_inventory_git.loader import load_git_inventory
 from hegemony_inventory_git.provider import GitInventoryProvider
 from hegemony_inventory_git.query import matches_query
 from hegemony_inventory_sdk import (
+    Capability,
     DeviceDescriptor,
     InventoryProviderError,
     ProviderCallContext,
@@ -122,6 +123,57 @@ def test_git_inventory_loader_rejects_unknown_site_parent(tmp_path: Path) -> Non
     result = load_git_inventory(tmp_path, "inventory")
 
     assert [error.message for error in result.errors] == ["Unknown parent site: emea"]
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "document"),
+    [
+        (
+            "devices/edge-01.yaml",
+            """
+            schema_version: 1
+            kind: device
+            external_id: edge-01
+            name: edge-01
+            mgmt_host: 192.0.2.10
+            ssh_password: {secret}
+            vendor: Cisco
+            """,
+        ),
+        (
+            "sites/ams01.yaml",
+            """
+            schema_version: 1
+            kind: site
+            external_id: ams01
+            name: Amsterdam
+            api_token: {secret}
+            """,
+        ),
+    ],
+)
+def test_git_inventory_loader_never_echoes_a_mistyped_secret_into_the_error(
+    tmp_path: Path, relative_path: str, document: str
+) -> None:
+    """A key the schema rejects may hold a literal credential; the error must not carry it.
+
+    pydantic's ``str(exc)`` renders every error with ``input_value=...``, so a stray
+    ``ssh_password: hunter2`` in a device file would reach the UI and the logs through
+    the load error envelope. The message names the location and the kind of error and
+    nothing else -- and the old top-level ``vendor`` key stays rejected.
+    """
+    secret = "s3cr3t-literal-hunter2"
+    _write_yaml(tmp_path / "inventory" / relative_path, document.format(secret=secret))
+
+    result = load_git_inventory(tmp_path, "inventory")
+
+    assert [error.file_path for error in result.errors] == [f"inventory/{relative_path}"]
+    message = result.errors[0].message
+    assert secret not in message
+    assert "input_value" not in message
+    assert "extra_forbidden" in message
+    for key in ("ssh_password", "vendor") if "device" in relative_path else ("api_token",):
+        assert key in message
 
 
 def test_git_inventory_loader_allows_duplicate_local_site_external_ids_in_different_paths(
@@ -606,3 +658,59 @@ async def test_git_provider_device_can_override_the_default_jump_host(tmp_path: 
         "port": 2022,
         "username_ref": "{{ secret('vault://lab/bastion/username') }}",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_does_not_discover_says_so(tmp_path: Path) -> None:
+    """Discovery is opt-in, and a source of truth with a fixed shape opts out.
+
+    A Git inventory serves exactly the object types this plugin was written for -- there
+    is no instance-specific answer to give -- so it neither declares the capability nor
+    implements the method, and the SDK's default says exactly that.
+    """
+    provider = GitInventoryProvider(
+        provider_id="git:primary",
+        config={"git_repo_id": str(uuid4()), "path": "inventory"},
+        services=FakePlatformServices(
+            provider_id="git:primary",
+            provider_type="git",
+            git=FakeGitFetcher(path=str(tmp_path)),
+        ),
+    )
+    assert Capability.DISCOVER not in provider.capabilities
+    with pytest.raises(InventoryProviderError) as raised:
+        await provider.discover(
+            context=ProviderCallContext(provider_id=provider.id, operation="discover")
+        )
+    assert raised.value.envelope.code == ProviderErrorCode.MALFORMED_QUERY
+    assert raised.value.envelope.retryable is False
+    assert "discover" in raised.value.envelope.message
+
+
+def test_device_facts_flow_through_attributes_only():
+    from hegemony_inventory_sdk import device_to_object_descriptor
+
+    facts = {"vendor": "Cisco", "model": "C8300", "current_version": "17.12.4", "critical": True}
+    payload = {
+        "schema_version": 1,
+        "kind": "device",
+        "external_id": "edge",
+        "name": "edge",
+        "mgmt_host": "192.0.2.1",
+        "attributes": facts,
+    }
+    device = GitInventoryDeviceV1.model_validate(payload)
+    provider = GitInventoryProvider(
+        provider_id="git:example",
+        config=_config("inventory").model_dump(mode="json"),
+        services=FakePlatformServices(),
+    )
+    descriptor = provider._map_device(device, {}, None, "head")
+    assert descriptor.attributes == facts
+    stored = device_to_object_descriptor(descriptor)
+    for key, value in facts.items():
+        assert stored.attributes[key] == value
+    for key in ("vendor", "model", "current_version"):
+        assert not hasattr(descriptor, key)
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            GitInventoryDeviceV1.model_validate({**payload, key: "old"})

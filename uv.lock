@@ -5,7 +5,6 @@ requires-python = ">=3.11"
 [manifest]
 members = [
     "hegemony-inventory-git",
-    "hegemony-inventory-infrahub",
     "hegemony-inventory-netbox",
     "hegemony-inventory-plugins-workspace",
     "hegemony-inventory-sdk",
@@ -130,21 +129,6 @@ dependencies = [
 requires-dist = [
     { name = "hegemony-inventory-sdk", editable = "packages/inventory_sdk" },
     { name = "pyyaml", specifier = ">=6.0.0" },
-]
-
-[[package]]
-name = "hegemony-inventory-infrahub"
-version = "0.4.0"
-source = { editable = "plugins/inventory_infrahub" }
-dependencies = [
-    { name = "hegemony-inventory-sdk" },
-    { name = "httpx" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "hegemony-inventory-sdk", editable = "packages/inventory_sdk" },
-    { name = "httpx", specifier = ">=0.27.0" },
 ]
 
 [[package]]

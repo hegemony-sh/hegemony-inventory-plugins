@@ -30,14 +30,12 @@ package = false
 members = [
     "packages/inventory_sdk",
     "plugins/inventory_netbox",
-    "plugins/inventory_infrahub",
     "plugins/inventory_git",
 ]
 
 [tool.uv.sources]
 hegemony-inventory-sdk = { workspace = true }
 hegemony-inventory-netbox = { workspace = true }
-hegemony-inventory-infrahub = { workspace = true }
 hegemony-inventory-git = { workspace = true }
 
 [tool.ruff]
@@ -62,7 +60,6 @@ combine-as-imports = true
 known-first-party = [
     "hegemony_inventory_sdk",
     "hegemony_inventory_netbox",
-    "hegemony_inventory_infrahub",
     "hegemony_inventory_git",
 ]
 

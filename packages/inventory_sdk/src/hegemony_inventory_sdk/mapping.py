@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .descriptors import ObjectDescriptor, ObjectRelationship
+from .identifiers import validate_object_type_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,12 @@ class RelationshipMapping:
     rel: str
     target_object_type: str
     source: str  # dotted path to the related object's external id
+
+    def __post_init__(self) -> None:
+        validate_object_type_id(
+            self.target_object_type,
+            field_name=f"relationship {self.rel!r} target_object_type",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +53,19 @@ class ObjectFieldMapping:
     field_map: Mapping[str, str] = field(default_factory=dict)
     display_name_field: str | None = None
     relationships: tuple[RelationshipMapping, ...] = ()
+    #: How the provider reaches this family, in whatever terms the provider uses.
+    #:
+    #: Opaque to the platform, which stores it and hands it straight back. A mapping
+    #: says how to read a record; it does not say where the records come from, and for a
+    #: family the provider *discovered* there is nowhere else for that to live -- the
+    #: family is absent from the catalogue the provider shipped, and the provider is
+    #: built fresh per operation and remembers nothing. So the provider writes down what
+    #: it will need (a REST path, a GraphQL type name) and reads it back on the next
+    #: call. Values are strings so the whole mapping round-trips through JSON unchanged.
+    source: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        validate_object_type_id(self.object_type)
 
 
 def extract_path(record: Mapping[str, Any], path: str) -> Any:

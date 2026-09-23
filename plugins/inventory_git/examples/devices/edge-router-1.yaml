@@ -10,8 +10,6 @@ name: edge-router-1
 mgmt_host: 10.0.0.1
 mgmt_port: 22
 platform: ios-xe
-vendor: cisco
-model: ASR1001-X
 site: emea/nl/ams01
 role: edge-router
 tags:
@@ -25,3 +23,6 @@ access_config:
     password_ref: "{{ secret('vault://devices/enable-password') }}"
 custom_fields:
   asset_tag: AMS-RTR-001
+attributes:
+  vendor: cisco
+  model: ASR1001-X
