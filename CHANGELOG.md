@@ -1,3 +1,16 @@
+## [0.4.1](https://github.com/hegemony-sh/hegemony-inventory-plugins/compare/v0.4.0...v0.4.1) (2026-09-25)
+
+### Bug Fixes
+
+* **netbox:** mask the token before cutting a refusal reason, and bound its read ([bd25df2](https://github.com/hegemony-sh/hegemony-inventory-plugins/commit/bd25df24a34f58cc7508c3074fe361638227700b))
+* **netbox:** name an object by display when its name field holds content ([84c6f1c](https://github.com/hegemony-sh/hegemony-inventory-plugins/commit/84c6f1c46aef0c533d45629c524c30ac5fe2d7c1))
+* **netbox:** never offer or read credential-store plugins ([2430730](https://github.com/hegemony-sh/hegemony-inventory-plugins/commit/24307304aa3131a3ea81179618e9ab526bcf02a6))
+* **netbox:** say why NetBox refused the token ([88d9e81](https://github.com/hegemony-sh/hegemony-inventory-plugins/commit/88d9e81611b004cc7744c49b1d04b7e6431fdbb6))
+
+### Performance Improvements
+
+* **netbox:** look the API token up once per provider, not per request ([8a1239b](https://github.com/hegemony-sh/hegemony-inventory-plugins/commit/8a1239bb207b6b62a1fb6bf06462624ffb80d82c))
+
 ## [0.4.0](https://github.com/hegemony-sh/hegemony-inventory-plugins/compare/v0.3.0...v0.4.0) (2026-09-23)
 
 ### ⚠ BREAKING CHANGES
