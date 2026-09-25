@@ -59,10 +59,18 @@ from .overlay import SKIP_PLUGINS
 
 KNOWN_AUTH_SCHEMES = frozenset({"bearer", "token", "basic"})
 _PLUGIN_PATH = re.compile(r"/api/plugins/(?P<app>[^/]+)/")
+# Room for any name someone types into NetBox, and the platform's column; a PEM public
+# key is several times this.
+_NAME_MAX_CHARS = 255
 # How much of a refused request's body is read for NetBox's reason, and how much of
 # that reason is kept. NetBox's own messages are one short sentence.
 _REFUSAL_BODY_MAX_BYTES = 4096
 _REFUSAL_DETAIL_MAX_CHARS = 300
+
+
+def _is_readable_name(value: str) -> bool:
+    """One line, and no longer than a NetBox name field can be."""
+    return len(value) <= _NAME_MAX_CHARS and len(value.splitlines()) <= 1
 
 
 def _withheld_plugin(url: str) -> str | None:
@@ -362,7 +370,9 @@ class NetBoxInventoryProvider(InventoryProvider):
             result_limit=limit,
         )
         return [
-            self._with_marker(self._with_provider_url(descriptor, item), item)
+            self._with_marker(
+                self._with_provider_url(self._with_readable_name(descriptor), item), item
+            )
             for descriptor, item in zip(
                 map_records(
                     (self._assignment_record(item, plan.object_type) for item in items),
@@ -399,7 +409,9 @@ class NetBoxInventoryProvider(InventoryProvider):
             page_limit=self._services.limits.max_provider_pages,
         ):
             yield [
-                self._with_marker(self._with_provider_url(descriptor, item), item)
+                self._with_marker(
+                    self._with_provider_url(self._with_readable_name(descriptor), item), item
+                )
                 for descriptor, item in zip(
                     map_records(
                         (self._assignment_record(item, plan.object_type) for item in items),
@@ -448,6 +460,26 @@ class NetBoxInventoryProvider(InventoryProvider):
         if stamp.tzinfo is not None and marker.endswith("Z"):
             return earlier.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         return earlier.isoformat()
+
+    @staticmethod
+    def _with_readable_name(descriptor: ObjectDescriptor) -> ObjectDescriptor:
+        """``descriptor`` named by NetBox's ``display`` when its own name is not a name.
+
+        A derived family is named by its first required, writable field, which is the
+        right answer for nearly everything NetBox ships and for most plugins. The schema
+        cannot say how long that field's values are, though, and a plugin whose first
+        field is content gets named by its content: netbox-secrets names a user key by
+        its PEM public key, several hundred characters over many lines. So the value
+        decides. A name that spans lines, or runs past any field NetBox names things
+        with, gives way to ``display``, which NetBox computes for exactly this -- unless
+        that is no better, when the name stays and the platform shortens it.
+        """
+        if _is_readable_name(descriptor.name):
+            return descriptor
+        shown = descriptor.display_name
+        if not shown or not _is_readable_name(shown):
+            return descriptor
+        return replace(descriptor, name=shown)
 
     @staticmethod
     def _with_marker(descriptor: ObjectDescriptor, item: Mapping[str, Any]) -> ObjectDescriptor:
@@ -593,10 +625,12 @@ class NetBoxInventoryProvider(InventoryProvider):
             )
         payload = await self._object_payload(plan, identifier, context)
         return self._with_provider_url(
-            map_record(
-                self._assignment_record(payload, plan.object_type),
-                plan.mapping,
-                provider_id=self.id,
+            self._with_readable_name(
+                map_record(
+                    self._assignment_record(payload, plan.object_type),
+                    plan.mapping,
+                    provider_id=self.id,
+                )
             ),
             payload,
         )

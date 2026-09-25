@@ -1535,6 +1535,69 @@ async def test_netbox_reads_a_family_only_the_instance_knows_about(
     }
 
 
+_PEM = (
+    "-----BEGIN PUBLIC KEY-----\r\n"
+    + "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\r\n" * 12
+    + ("-----END PUBLIC KEY-----")
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("value", "display", "expected"),
+    [
+        # A plugin family whose first writable field is content, not a name.
+        (_PEM, "superadmin", "superadmin"),
+        ("x" * 256, "short", "short"),
+        ("two\nlines", "one line", "one line"),
+        # A name that is a name stays, whatever NetBox would display instead.
+        ("x" * 255, "short", "x" * 255),
+        ("edge-key", "Edge key (edge-key)", "edge-key"),
+        # display is no better, so the name stays and the platform shortens it.
+        (_PEM, _PEM, _PEM),
+        (_PEM, None, _PEM),
+    ],
+)
+async def test_a_name_that_is_not_a_name_gives_way_to_netboxs_display(
+    monkeypatch: pytest.MonkeyPatch, value: str, display: str | None, expected: str
+) -> None:
+    record = {"id": 1, "public_key": value, "display": display, "user": "superadmin"}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/1/"):
+            return httpx.Response(200, json=record)
+        return httpx.Response(200, json={"results": [record], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    mapping = ObjectFieldMapping(
+        object_type="netbox_ssh.keys",
+        identity="id",
+        name_field="public_key",
+        display_name_field="display",
+        field_map={"public_key": "public_key", "user": "user"},
+        source={"endpoint": "/api/plugins/netbox-ssh/keys/"},
+    )
+    context = ProviderCallContext(
+        provider_id="netbox:primary",
+        operation="auto_sync_objects:netbox_ssh.keys",
+        object_mapping=mapping,
+    )
+    provider = _provider(token="netbox-token")
+
+    (listed,) = await provider.list_objects("netbox_ssh.keys", context=context)
+    (paged,) = [
+        item
+        async for page in provider.iter_object_pages("netbox_ssh.keys", context=context)
+        for item in page
+    ]
+    fetched = await provider.get_object("netbox_ssh.keys", "1", context=context)
+
+    for descriptor in (listed, paged, fetched):
+        assert descriptor.name == expected
+        # The value itself is never lost.
+        assert descriptor.attributes["public_key"] == value
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("endpoint", "plugin"),

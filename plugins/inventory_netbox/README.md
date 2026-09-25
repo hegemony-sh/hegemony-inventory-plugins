@@ -618,7 +618,10 @@ happens. The table is what makes that mechanical when it is worth doing.
 Everything else is derived, including the rules the written catalogue had to be
 corrected into following: a derived browse column never names a legacy spelling, and a
 derived name field is the property someone *sets* rather than one NetBox computes, so a
-prefix is named by `prefix` and not by how many child prefixes it has.
+prefix is named by `prefix` and not by how many child prefixes it has. Where that
+property holds content rather than a name — a value over several lines or longer than
+255 characters, like a plugin that names a key by the key itself — an object is named
+by NetBox's `display` instead, and the value stays in its attributes.
 
 `REPLACED_FIELDS` is one table because the three rules that follow from it must not
 drift apart. From the same nine pairs the deriver decides which spelling to synthesise
