@@ -62,6 +62,8 @@ _PLUGIN_PATH = re.compile(r"/api/plugins/(?P<app>[^/]+)/")
 # Room for any name someone types into NetBox, and the platform's column; a PEM public
 # key is several times this.
 _NAME_MAX_CHARS = 255
+# The longest a resolved token is reused before it is looked up again.
+_TOKEN_REUSE_SECONDS = 300.0
 # How much of a refused request's body is read for NetBox's reason, and how much of
 # that reason is kept. NetBox's own messages are one short sentence.
 _REFUSAL_BODY_MAX_BYTES = 4096
@@ -184,6 +186,8 @@ class NetBoxInventoryProvider(InventoryProvider):
         self.config = NetBoxProviderConfig.model_validate(config or {})
         self._services = services
         self._object_sources: dict[str, NetBoxObjectType] = sources_for(ALL_OBJECT_TYPE_IDS)
+        # (token_ref, when it was resolved, the token) -- see _token.
+        self._resolved_token: tuple[str, float, str | None] | None = None
 
     @property
     def discovery_cache_key(self) -> str:
@@ -853,9 +857,7 @@ class NetBoxInventoryProvider(InventoryProvider):
                 context.operation,
                 safe_details={"plugin": withheld},
             )
-        token = await self._services.resolve_secret_ref(
-            self.config.token_ref, operation=context.operation
-        )
+        token = await self._token(context.operation)
         authorization_values = self._authorization_header_values(token)
         retry_attempts = 4
         async with AsyncExitStack() as stack:
@@ -886,7 +888,9 @@ class NetBoxInventoryProvider(InventoryProvider):
                                 # reads the token version from the token itself, so on a
                                 # release that knows both schemes they answer alike, and
                                 # on one that knows only the fallback it is the fallback
-                                # that says why.
+                                # that says why. The token is forgotten, so a secret
+                                # rotated since it was read is read again next time.
+                                self._resolved_token = None
                                 raise await self._auth_failed(resp, token, context.operation)
                             if resp.status_code == 404:
                                 raise self._error(
@@ -957,6 +961,25 @@ class NetBoxInventoryProvider(InventoryProvider):
             context.operation,
             retryable=True,
         )
+
+    async def _token(self, operation: str) -> str | None:
+        """The API token, resolved once for this provider rather than once per request.
+
+        The platform builds a provider for each sync and each API request, and a sync
+        reads every family, one request or more each. Resolving per request meant a
+        secret-backend round trip per request -- about a hundred Vault logins in one
+        sync. So the token is kept for the provider's life, which is one sync, but for
+        no longer than :data:`_TOKEN_REUSE_SECONDS` in case a provider outlives that,
+        and it is dropped when NetBox refuses it (see _request_json).
+        """
+        ref = self.config.token_ref
+        now = monotonic()
+        cached = self._resolved_token
+        if cached is not None and cached[0] == ref and now - cached[1] < _TOKEN_REUSE_SECONDS:
+            return cached[2]
+        token = await self._services.resolve_secret_ref(ref, operation=operation)
+        self._resolved_token = (ref, now, token)
+        return token
 
     def _request_url(self, path_or_url: str, operation: str, *, base_url: str | None = None) -> str:
         base_url = base_url or str(self.config.url)

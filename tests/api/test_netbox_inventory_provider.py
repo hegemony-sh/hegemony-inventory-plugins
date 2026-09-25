@@ -136,6 +136,98 @@ async def test_netbox_unprefixed_token_retries_token_after_bearer_auth_failure(
     assert captured == ["Bearer netbox-token", "Token netbox-token"]
 
 
+def _counted_lookups(
+    monkeypatch: pytest.MonkeyPatch, provider: NetBoxInventoryProvider, tokens: list[str]
+) -> list[str]:
+    """Make ``provider``'s secret lookups answer ``tokens`` in turn, and log each one."""
+    lookups: list[str] = []
+
+    async def resolve_secret_ref(ref: str | None, *, operation: str) -> str | None:
+        lookups.append(operation)
+        return tokens[min(len(lookups), len(tokens)) - 1]
+
+    monkeypatch.setattr(provider._services, "resolve_secret_ref", resolve_secret_ref)
+    return lookups
+
+
+@pytest.mark.asyncio
+async def test_a_provider_looks_its_token_up_once_however_many_requests_it_makes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One lookup per request was a Vault login per request: about a hundred per sync."""
+    requests: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.params.get("offset") != "1":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [{"id": 1, "name": "a"}],
+                    "next": f"{request.url.copy_merge_params({'offset': '1'})}",
+                },
+            )
+        return httpx.Response(200, json={"results": [{"id": 2, "name": "b"}], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider()
+    lookups = _counted_lookups(monkeypatch, provider, ["netbox-token"])
+
+    for object_type in ("interface", "vlan"):
+        await provider.list_objects(
+            object_type,
+            context=ProviderCallContext(
+                provider_id="netbox:primary", operation=f"auto_sync_objects:{object_type}"
+            ),
+        )
+
+    assert len(requests) == 4
+    assert lookups == ["auto_sync_objects:interface"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_token_is_looked_up_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A secret rotated mid-sync must not fail every family after the first refusal."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("authorization") == "Bearer rotated":
+            return httpx.Response(200, json={"results": [], "next": None})
+        return httpx.Response(403, json={"detail": "Invalid v2 token"})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider({"auth_fallback_schemes": []})
+    lookups = _counted_lookups(monkeypatch, provider, ["stale", "rotated"])
+    context = ProviderCallContext(provider_id="netbox:primary", operation="read_objects")
+
+    with pytest.raises(InventoryProviderError):
+        await provider.list_objects("interface", context=context)
+    assert await provider.list_objects("interface", context=context) == []
+    assert len(lookups) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_token_is_not_reused_past_its_reuse_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider()
+    lookups = _counted_lookups(monkeypatch, provider, ["netbox-token"])
+    clock = [1000.0]
+    monkeypatch.setattr(netbox_provider_module, "monotonic", lambda: clock[0])
+    context = ProviderCallContext(provider_id="netbox:primary", operation="read_objects")
+
+    await provider.list_objects("interface", context=context)
+    clock[0] += netbox_provider_module._TOKEN_REUSE_SECONDS - 1
+    await provider.list_objects("interface", context=context)
+    assert len(lookups) == 1
+    clock[0] += 1
+    await provider.list_objects("interface", context=context)
+    assert len(lookups) == 2
+
+
 @pytest.mark.asyncio
 async def test_netbox_client_400_returns_safe_malformed_query_error(
     monkeypatch: pytest.MonkeyPatch,
