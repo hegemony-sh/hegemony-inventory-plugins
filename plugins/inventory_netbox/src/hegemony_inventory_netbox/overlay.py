@@ -522,6 +522,17 @@ SKIP_ENDPOINTS: frozenset[str] = frozenset(
     }
 )
 
+#: NetBox plugins that are credential stores, by the app segment of their API path
+#: (``/api/plugins/<app>/``). Unlike :data:`SKIP_ENDPOINTS` this is not plumbing, and it
+#: is the one place this plugin decides what may be synced rather than leaving it to the
+#: platform: netbox-secrets serves, for every secret, a PBKDF2 hash of its plaintext at
+#: a deliberately low iteration count, and netbox-secretstore before it did the same. An
+#: inventory copy of those hands whoever can read the inventory -- or its logs -- what
+#: it takes to attack the secrets offline. So their families are never offered, and the
+#: provider refuses to read them even when asked, which covers a platform still holding
+#: them from a discovery made before this list existed.
+SKIP_PLUGINS: frozenset[str] = frozenset({"netbox_secretstore", "secrets"})
+
 
 @dataclass(frozen=True, slots=True)
 class Overlay:
@@ -542,6 +553,7 @@ class Overlay:
     bindings: Mapping[str, ProjectionBinding] = field(default_factory=lambda: BINDINGS)
     keep_properties: frozenset[tuple[str, str]] = KEEP_PROPERTIES
     skip_endpoints: frozenset[str] = SKIP_ENDPOINTS
+    skip_plugins: frozenset[str] = SKIP_PLUGINS
 
 
 DEFAULT_OVERLAY = Overlay()

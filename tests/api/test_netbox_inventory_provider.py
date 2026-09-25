@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import pathlib
+import tracemalloc
+import zlib
 from collections.abc import Callable
 from typing import Any
 
@@ -134,6 +137,100 @@ async def test_netbox_unprefixed_token_retries_token_after_bearer_auth_failure(
     )
 
     assert captured == ["Bearer netbox-token", "Token netbox-token"]
+
+
+def _counted_lookups(
+    monkeypatch: pytest.MonkeyPatch, provider: NetBoxInventoryProvider, tokens: list[str]
+) -> list[str]:
+    """Make ``provider``'s secret lookups answer ``tokens`` in turn, and log each one."""
+    lookups: list[str] = []
+
+    async def resolve_secret_ref(ref: str | None, *, operation: str) -> str | None:
+        lookups.append(operation)
+        return tokens[min(len(lookups), len(tokens)) - 1]
+
+    monkeypatch.setattr(provider._services, "resolve_secret_ref", resolve_secret_ref)
+    return lookups
+
+
+@pytest.mark.asyncio
+async def test_a_provider_looks_its_token_up_once_however_many_requests_it_makes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One lookup per request was a Vault login per request: about a hundred per sync."""
+    requests: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.params.get("offset") != "1":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [{"id": 1, "name": "a"}],
+                    "next": f"{request.url.copy_merge_params({'offset': '1'})}",
+                },
+            )
+        return httpx.Response(200, json={"results": [{"id": 2, "name": "b"}], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider()
+    lookups = _counted_lookups(monkeypatch, provider, ["netbox-token"])
+
+    for object_type in ("interface", "vlan"):
+        await provider.list_objects(
+            object_type,
+            context=ProviderCallContext(
+                provider_id="netbox:primary", operation=f"auto_sync_objects:{object_type}"
+            ),
+        )
+
+    assert len(requests) == 4
+    assert lookups == ["auto_sync_objects:interface"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_token_is_looked_up_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A secret rotated mid-sync must not fail every family after the first refusal."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("authorization") == "Bearer rotated":
+            return httpx.Response(200, json={"results": [], "next": None})
+        return httpx.Response(403, json={"detail": "Invalid v2 token"})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider({"auth_fallback_schemes": []})
+    lookups = _counted_lookups(monkeypatch, provider, ["stale", "rotated"])
+    context = ProviderCallContext(provider_id="netbox:primary", operation="read_objects")
+
+    with pytest.raises(InventoryProviderError):
+        await provider.list_objects("interface", context=context)
+    assert await provider.list_objects("interface", context=context) == []
+    assert len(lookups) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_token_is_not_reused_past_its_reuse_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider kept longer than a sync still picks up a rotated secret in time."""
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider()
+    lookups = _counted_lookups(monkeypatch, provider, ["netbox-token"])
+    clock = [1000.0]
+    monkeypatch.setattr(netbox_provider_module, "monotonic", lambda: clock[0])
+    context = ProviderCallContext(provider_id="netbox:primary", operation="read_objects")
+
+    await provider.list_objects("interface", context=context)
+    clock[0] += netbox_provider_module._TOKEN_REUSE_SECONDS - 1
+    await provider.list_objects("interface", context=context)
+    assert len(lookups) == 1
+    clock[0] += 1
+    await provider.list_objects("interface", context=context)
+    assert len(lookups) == 2
 
 
 @pytest.mark.asyncio
@@ -1048,6 +1145,179 @@ async def test_a_refused_connection_test_reports_the_error_and_no_details(
 
 
 @pytest.mark.asyncio
+async def test_a_refused_token_reports_netboxs_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 403 alone cannot tell a wrong token from an allowed-IPs miss; NetBox's detail can."""
+    reason = "Source IP ::ffff:192.168.20.27 is not permitted to authenticate using this token."
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"detail": reason})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    result = await _provider(token="nbt_abc.def").test_connection(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="test_connection",
+            query_hash="status",
+            config_version=1,
+        )
+    )
+
+    assert result.ok is False
+    assert result.message == f"NetBox authentication failed: {reason}"
+    assert result.error is not None
+    assert result.error["code"] == ProviderErrorCode.AUTH_FAILED.value
+    assert result.error["safe_details"] == {"status_code": 403, "netbox_detail": reason}
+
+
+@pytest.mark.asyncio
+async def test_the_reported_refusal_is_the_last_schemes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A release that knows only ``Token`` ignores ``Bearer``; the fallback says why."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("authorization", "").startswith("Bearer "):
+            return httpx.Response(
+                403, json={"detail": "Authentication credentials were not provided."}
+            )
+        return httpx.Response(403, json={"detail": "Token expired"})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    with pytest.raises(InventoryProviderError) as refused:
+        await _provider(token="netbox-token").list_objects(
+            "interface",
+            limit=10,
+            context=ProviderCallContext(provider_id="netbox:primary", operation="read_objects"),
+        )
+
+    assert refused.value.envelope.message == "NetBox authentication failed: Token expired"
+
+
+@pytest.mark.asyncio
+async def test_a_compressed_refusal_is_inflated_no_further_than_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Twenty kilobytes that inflate to twenty megabytes must cost kilobytes to refuse.
+
+    Decoding a whole network chunk before looking at the cap would build the whole
+    twenty megabytes first, which is the allocation this measures.
+    """
+    bomb = gzip.compress(b'{"detail": "' + b"x" * 20_000_000 + b'"}')
+    assert len(bomb) < 100_000
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403, stream=httpx.ByteStream(bomb), headers={"content-encoding": "gzip"}
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider({"auth_fallback_schemes": []}, token="netbox-token")
+    context = ProviderCallContext(provider_id="netbox:primary", operation="read_objects")
+    tracemalloc.start()
+    try:
+        with pytest.raises(InventoryProviderError) as refused:
+            await provider.list_objects("interface", limit=10, context=context)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # The cap cut the JSON short, so there is no reason to report -- and no megabytes.
+    assert refused.value.envelope.message == "NetBox authentication failed"
+    assert peak < 2_000_000
+
+
+# Shaped like a NetBox v2 token: nbt_<key>.<secret>.
+_V2_SECRET = "S3cr3tS3cr3tS3cr3tS3cr3tS3cr3tS3cr3tS3cr"
+_V2_TOKEN = f"nbt_K3yK3yK3yK3y.{_V2_SECRET}"
+_TOKEN_EXPIRED = json.dumps({"detail": "Token expired"}).encode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "expected_detail"),
+    [
+        # A proxy's error page: nothing NetBox said, so nothing to report.
+        (httpx.Response(403, text="<html><body>Forbidden</body></html>"), None),
+        (httpx.Response(401, json={"detail": ["not", "a", "string"]}), None),
+        (httpx.Response(403, json=["no", "object"]), None),
+        (httpx.Response(403, json={"detail": "  "}), None),
+        # Flattened to one line, so a log line stays one line.
+        (httpx.Response(403, json={"detail": "Invalid\r\ntoken\x1b[0m"}), "Invalid token [0m"),
+        # Something in front of NetBox echoing the header must not echo the token.
+        (
+            httpx.Response(403, json={"detail": f"Rejected header: Bearer {_V2_TOKEN}"}),
+            "Rejected header: Bearer ***",
+        ),
+        # Nor its secret half, which grants access on its own.
+        (httpx.Response(403, json={"detail": f"secret {_V2_SECRET}"}), "secret ***"),
+        # Masked before the cut: a token straddling it would otherwise leave its front.
+        (httpx.Response(403, json={"detail": "x" * 290 + " " + _V2_TOKEN}), "x" * 290 + " ***"),
+        (httpx.Response(403, json={"detail": "x" * 1000}), "x" * 299 + "…"),
+        # Read as it streams, not only when already buffered.
+        (httpx.Response(403, stream=httpx.ByteStream(_TOKEN_EXPIRED)), "Token expired"),
+        # A proxy that compresses its error pages still reports NetBox's reason.
+        (
+            httpx.Response(
+                403,
+                stream=httpx.ByteStream(gzip.compress(_TOKEN_EXPIRED)),
+                headers={"content-encoding": "gzip"},
+            ),
+            "Token expired",
+        ),
+        (
+            httpx.Response(
+                403,
+                stream=httpx.ByteStream(zlib.compress(_TOKEN_EXPIRED)),
+                headers={"content-encoding": "deflate"},
+            ),
+            "Token expired",
+        ),
+        # An encoding nothing here unpacks with a bound, or a body that does not unpack.
+        (
+            httpx.Response(
+                403, stream=httpx.ByteStream(b"\x0b\x05"), headers={"content-encoding": "br"}
+            ),
+            None,
+        ),
+        (
+            httpx.Response(
+                403, stream=httpx.ByteStream(b"not gzip"), headers={"content-encoding": "gzip"}
+            ),
+            None,
+        ),
+    ],
+)
+async def test_a_refusal_reason_is_kept_only_when_safe_to_show(
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response,
+    expected_detail: str | None,
+) -> None:
+    """Every reason shown is NetBox's own text, on one line, short, and token-free."""
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return response
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    with pytest.raises(InventoryProviderError) as refused:
+        await _provider({"auth_fallback_schemes": []}, token=_V2_TOKEN).list_objects(
+            "interface",
+            limit=10,
+            context=ProviderCallContext(provider_id="netbox:primary", operation="read_objects"),
+        )
+
+    envelope = refused.value.envelope
+    assert envelope.code == ProviderErrorCode.AUTH_FAILED
+    assert envelope.safe_details.get("netbox_detail") == expected_detail
+    assert envelope.safe_details["status_code"] == response.status_code
+    if expected_detail is None:
+        assert envelope.message == "NetBox authentication failed"
+    else:
+        assert envelope.message == f"NetBox authentication failed: {expected_detail}"
+
+
+@pytest.mark.asyncio
 async def test_a_netbox_that_answers_status_with_less_still_passes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1437,6 +1707,114 @@ async def test_netbox_reads_a_family_only_the_instance_knows_about(
         "type": "A",
         "value": "10.0.0.8",
     }
+
+
+_PEM = (
+    "-----BEGIN PUBLIC KEY-----\r\n"
+    + "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\r\n" * 12
+    + ("-----END PUBLIC KEY-----")
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("value", "display", "expected"),
+    [
+        # A plugin family whose first writable field is content, not a name.
+        (_PEM, "superadmin", "superadmin"),
+        ("x" * 256, "short", "short"),
+        ("two\nlines", "one line", "one line"),
+        # A name that is a name stays, whatever NetBox would display instead.
+        ("x" * 255, "short", "x" * 255),
+        ("edge-key", "Edge key (edge-key)", "edge-key"),
+        # display is no better, so the name stays and the platform shortens it.
+        (_PEM, _PEM, _PEM),
+        (_PEM, None, _PEM),
+    ],
+)
+async def test_a_name_that_is_not_a_name_gives_way_to_netboxs_display(
+    monkeypatch: pytest.MonkeyPatch, value: str, display: str | None, expected: str
+) -> None:
+    """The same on every read path: a listing, a paged listing and a single object."""
+    record = {"id": 1, "public_key": value, "display": display, "user": "superadmin"}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/1/"):
+            return httpx.Response(200, json=record)
+        return httpx.Response(200, json={"results": [record], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    mapping = ObjectFieldMapping(
+        object_type="netbox_ssh.keys",
+        identity="id",
+        name_field="public_key",
+        display_name_field="display",
+        field_map={"public_key": "public_key", "user": "user"},
+        source={"endpoint": "/api/plugins/netbox-ssh/keys/"},
+    )
+    context = ProviderCallContext(
+        provider_id="netbox:primary",
+        operation="auto_sync_objects:netbox_ssh.keys",
+        object_mapping=mapping,
+    )
+    provider = _provider(token="netbox-token")
+
+    (listed,) = await provider.list_objects("netbox_ssh.keys", context=context)
+    (paged,) = [
+        item
+        async for page in provider.iter_object_pages("netbox_ssh.keys", context=context)
+        for item in page
+    ]
+    fetched = await provider.get_object("netbox_ssh.keys", "1", context=context)
+
+    for descriptor in (listed, paged, fetched):
+        assert descriptor.name == expected
+        # The value itself is never lost.
+        assert descriptor.attributes["public_key"] == value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("endpoint", "plugin"),
+    [
+        ("/api/plugins/secrets/secrets/", "secrets"),
+        ("/api/plugins/secrets/user-keys/", "secrets"),
+        ("/api/plugins/netbox_secretstore/secrets/", "netbox_secretstore"),
+        # NetBox routes on the decoded path, so the check does too.
+        ("/api/plugins/%73ecrets/secrets/", "secrets"),
+    ],
+)
+async def test_a_credential_store_plugin_is_never_read_even_when_asked(
+    monkeypatch: pytest.MonkeyPatch, endpoint: str, plugin: str
+) -> None:
+    """A platform may still hold a mapping from a discovery made before the skip."""
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    mapping = ObjectFieldMapping(
+        object_type="secrets.secrets",
+        identity="id",
+        name_field="name",
+        field_map={"name": "name", "hash": "hash"},
+        source={"endpoint": endpoint},
+    )
+    with pytest.raises(InventoryProviderError) as refused:
+        await _provider(token="netbox-token").list_objects(
+            "secrets.secrets",
+            context=ProviderCallContext(
+                provider_id="netbox:primary",
+                operation="auto_sync_objects:secrets.secrets",
+                object_mapping=mapping,
+            ),
+        )
+
+    assert requested == []
+    assert refused.value.envelope.code == ProviderErrorCode.MALFORMED_QUERY
+    assert refused.value.envelope.safe_details == {"plugin": plugin}
 
 
 @pytest.mark.asyncio

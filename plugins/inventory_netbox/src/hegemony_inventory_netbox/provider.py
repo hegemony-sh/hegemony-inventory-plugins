@@ -10,13 +10,15 @@ import asyncio
 import builtins
 import hashlib
 import json
+import re
+import zlib
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any, cast
-from urllib.parse import ParseResult, quote, urlencode, urljoin, urlparse
+from urllib.parse import ParseResult, quote, unquote, urlencode, urljoin, urlparse
 
 import httpx
 
@@ -54,8 +56,113 @@ from .derive import (
 )
 from .filters import LOOKUP_SUFFIX as _SCOPE_LOOKUP_SUFFIX, intersect_queries as _intersect_queries
 from .object_types import ALL_OBJECT_TYPE_IDS, NetBoxObjectType, sources_for
+from .overlay import SKIP_PLUGINS
 
 KNOWN_AUTH_SCHEMES = frozenset({"bearer", "token", "basic"})
+_PLUGIN_PATH = re.compile(r"/api/plugins/(?P<app>[^/]+)/")
+# Room for any name someone types into NetBox, and the platform's column; a PEM public
+# key is several times this.
+_NAME_MAX_CHARS = 255
+# The longest a resolved token is reused before it is looked up again.
+_TOKEN_REUSE_SECONDS = 300.0
+# How much of a refused request's body is read for NetBox's reason, and how much of
+# that reason is kept. NetBox's own messages are one short sentence.
+_REFUSAL_BODY_MAX_BYTES = 4096
+_REFUSAL_DETAIL_MAX_CHARS = 300
+
+
+async def _read_refusal_body(response: httpx.Response) -> bytes:
+    """At most :data:`_REFUSAL_BODY_MAX_BYTES` of a refused response's body, decoded.
+
+    Read raw and inflated here rather than through ``aiter_bytes``, which decodes each
+    network chunk whole before handing it over, so a compressed chunk can expand to far
+    more than the cap before the cap is looked at. ``zlib`` is told how much it may
+    produce instead. An encoding other than gzip or deflate is not unpacked at all:
+    nothing in an error body is worth a decoder without that bound.
+
+    A response already read -- by a transport that buffers, as httpx's own test
+    responses do -- cannot be streamed again, and its decoding has already happened, so
+    what it holds is used as it is.
+    """
+    if response.is_stream_consumed:
+        try:
+            return response.content[:_REFUSAL_BODY_MAX_BYTES]
+        except httpx.ResponseNotRead:
+            return b""
+    encoding = response.headers.get("content-encoding", "").strip().lower()
+    if encoding in {"", "identity"}:
+        inflater = None
+    elif encoding in {"gzip", "x-gzip", "deflate"}:
+        # 32 + MAX_WBITS takes the gzip and the zlib wrapper alike.
+        inflater = zlib.decompressobj(32 + zlib.MAX_WBITS)
+    else:
+        return b""
+    body = bytearray()
+    try:
+        async for raw in response.aiter_raw():
+            # Never zero: the loop stops once the body is full, and zlib reads a
+            # max_length of zero as no limit at all.
+            room = _REFUSAL_BODY_MAX_BYTES - len(body)
+            body += raw[:room] if inflater is None else inflater.decompress(raw, room)
+            if len(body) >= _REFUSAL_BODY_MAX_BYTES:
+                break
+    except (httpx.HTTPError, zlib.error):
+        return b""
+    return bytes(body)
+
+
+def _refusal_detail(body: bytes, token: str | None) -> str | None:
+    """NetBox's ``detail`` string from a refused response's body, fit to show.
+
+    It lands in logs and in the sync history, so it is flattened to one line and cut
+    short, and the token is masked in case something in front of NetBox echoes the
+    header back. The masking comes first, on the text as it arrived: cut first, and a
+    token straddling the cut leaves its front half behind, which no longer matches the
+    whole token to be masked.
+    """
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if not isinstance(detail, str):
+        return None
+    for secret in _token_forms(token):
+        detail = detail.replace(secret, "***")
+    flattened = " ".join("".join(ch if ch.isprintable() else " " for ch in detail).split())
+    if len(flattened) > _REFUSAL_DETAIL_MAX_CHARS:
+        flattened = flattened[: _REFUSAL_DETAIL_MAX_CHARS - 1].rstrip() + "…"
+    return flattened or None
+
+
+def _token_forms(token: str | None) -> builtins.list[str]:
+    """Each form of ``token`` an echo could carry, longest first.
+
+    The token as stored, without the scheme it may be stored with, and a v2 token's
+    secret half (``nbt_<key>.<secret>``), which is what grants access even when echoed
+    on its own. Forms too short to be a secret are left alone rather than masked out of
+    ordinary words.
+    """
+    stripped = (token or "").strip()
+    forms = {stripped, stripped.partition(" ")[2].strip(), stripped.rpartition(".")[2]}
+    return sorted((form for form in forms if len(form) >= 8), key=len, reverse=True)
+
+
+def _is_readable_name(value: str) -> bool:
+    """One line, and no longer than a NetBox name field can be."""
+    return len(value) <= _NAME_MAX_CHARS and len(value.splitlines()) <= 1
+
+
+def _withheld_plugin(url: str) -> str | None:
+    """The credential-store plugin ``url`` reads from, if any; see :data:`.overlay.SKIP_PLUGINS`.
+
+    Matched on the decoded path, because NetBox routes on it: ``%73ecrets`` reaches the
+    same view as ``secrets``.
+    """
+    match = _PLUGIN_PATH.search(unquote(urlparse(url).path).lower())
+    if match is not None and match["app"] in SKIP_PLUGINS:
+        return match["app"]
+    return None
 
 
 def _query_to_expr(query: Mapping[str, Any] | None) -> str:
@@ -157,6 +264,8 @@ class NetBoxInventoryProvider(InventoryProvider):
         self.config = NetBoxProviderConfig.model_validate(config or {})
         self._services = services
         self._object_sources: dict[str, NetBoxObjectType] = sources_for(ALL_OBJECT_TYPE_IDS)
+        # (token_ref, when it was resolved, the token) -- see _token.
+        self._resolved_token: tuple[str, float, str | None] | None = None
 
     @property
     def discovery_cache_key(self) -> str:
@@ -343,7 +452,9 @@ class NetBoxInventoryProvider(InventoryProvider):
             result_limit=limit,
         )
         return [
-            self._with_marker(self._with_provider_url(descriptor, item), item)
+            self._with_marker(
+                self._with_provider_url(self._with_readable_name(descriptor), item), item
+            )
             for descriptor, item in zip(
                 map_records(
                     (self._assignment_record(item, plan.object_type) for item in items),
@@ -380,7 +491,9 @@ class NetBoxInventoryProvider(InventoryProvider):
             page_limit=self._services.limits.max_provider_pages,
         ):
             yield [
-                self._with_marker(self._with_provider_url(descriptor, item), item)
+                self._with_marker(
+                    self._with_provider_url(self._with_readable_name(descriptor), item), item
+                )
                 for descriptor, item in zip(
                     map_records(
                         (self._assignment_record(item, plan.object_type) for item in items),
@@ -429,6 +542,26 @@ class NetBoxInventoryProvider(InventoryProvider):
         if stamp.tzinfo is not None and marker.endswith("Z"):
             return earlier.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         return earlier.isoformat()
+
+    @staticmethod
+    def _with_readable_name(descriptor: ObjectDescriptor) -> ObjectDescriptor:
+        """``descriptor`` named by NetBox's ``display`` when its own name is not a name.
+
+        A derived family is named by its first required, writable field, which is the
+        right answer for nearly everything NetBox ships and for most plugins. The schema
+        cannot say how long that field's values are, though, and a plugin whose first
+        field is content gets named by its content: netbox-secrets names a user key by
+        its PEM public key, several hundred characters over many lines. So the value
+        decides. A name that spans lines, or runs past any field NetBox names things
+        with, gives way to ``display``, which NetBox computes for exactly this -- unless
+        that is no better, when the name stays and the platform shortens it.
+        """
+        if _is_readable_name(descriptor.name):
+            return descriptor
+        shown = descriptor.display_name
+        if not shown or not _is_readable_name(shown):
+            return descriptor
+        return replace(descriptor, name=shown)
 
     @staticmethod
     def _with_marker(descriptor: ObjectDescriptor, item: Mapping[str, Any]) -> ObjectDescriptor:
@@ -574,10 +707,12 @@ class NetBoxInventoryProvider(InventoryProvider):
             )
         payload = await self._object_payload(plan, identifier, context)
         return self._with_provider_url(
-            map_record(
-                self._assignment_record(payload, plan.object_type),
-                plan.mapping,
-                provider_id=self.id,
+            self._with_readable_name(
+                map_record(
+                    self._assignment_record(payload, plan.object_type),
+                    plan.mapping,
+                    provider_id=self.id,
+                )
             ),
             payload,
         )
@@ -789,9 +924,18 @@ class NetBoxInventoryProvider(InventoryProvider):
         base_url = base_url or str(self.config.url)
         await self._services.validate_url(base_url, operation=context.operation)
         url = self._request_url(path_or_url, context.operation, base_url=base_url)
-        token = await self._services.resolve_secret_ref(
-            self.config.token_ref, operation=context.operation
-        )
+        # Checked here, where every read passes, rather than where families are offered:
+        # the platform names the endpoint in the mapping it sends, and a mapping from a
+        # discovery made before a plugin was withheld still names it.
+        withheld = _withheld_plugin(url)
+        if withheld is not None:
+            raise self._error(
+                ProviderErrorCode.MALFORMED_QUERY,
+                f"NetBox plugin '{withheld}' stores credentials and is never read",
+                context.operation,
+                safe_details={"plugin": withheld},
+            )
+        token = await self._token(context.operation)
         authorization_values = self._authorization_header_values(token)
         retry_attempts = 4
         async with AsyncExitStack() as stack:
@@ -808,8 +952,9 @@ class NetBoxInventoryProvider(InventoryProvider):
                     headers = {"Authorization": authorization} if authorization else {}
                     try:
                         # Streamed rather than fetched whole: the status arrives before
-                        # the body does, so an error response is never read at all, and
-                        # a success is read under the cap in _read_capped.
+                        # the body does, so an error response is read only as far as
+                        # _auth_failed needs, and a success is read under the cap in
+                        # _read_capped.
                         async with client.stream(method, url, headers=headers) as resp:
                             if (
                                 resp.status_code in {401, 403}
@@ -817,11 +962,14 @@ class NetBoxInventoryProvider(InventoryProvider):
                             ):
                                 continue
                             if resp.status_code in {401, 403}:
-                                raise self._error(
-                                    ProviderErrorCode.AUTH_FAILED,
-                                    "NetBox authentication failed",
-                                    context.operation,
-                                )
+                                # The last scheme's answer is the one reported: NetBox
+                                # reads the token version from the token itself, so on a
+                                # release that knows both schemes they answer alike, and
+                                # on one that knows only the fallback it is the fallback
+                                # that says why. The token is forgotten, so a secret
+                                # rotated since it was read is read again next time.
+                                self._resolved_token = None
+                                raise await self._auth_failed(resp, token, context.operation)
                             if resp.status_code == 404:
                                 raise self._error(
                                     ProviderErrorCode.NOT_FOUND,
@@ -891,6 +1039,25 @@ class NetBoxInventoryProvider(InventoryProvider):
             context.operation,
             retryable=True,
         )
+
+    async def _token(self, operation: str) -> str | None:
+        """The API token, resolved once for this provider rather than once per request.
+
+        The platform builds a provider for each sync and each API request, and a sync
+        reads every family, one request or more each. Resolving per request meant a
+        secret-backend round trip per request -- about a hundred Vault logins in one
+        sync. So the token is kept for the provider's life, which is one sync, but for
+        no longer than :data:`_TOKEN_REUSE_SECONDS` in case a provider outlives that,
+        and it is dropped when NetBox refuses it (see _request_json).
+        """
+        ref = self.config.token_ref
+        now = monotonic()
+        cached = self._resolved_token
+        if cached is not None and cached[0] == ref and now - cached[1] < _TOKEN_REUSE_SECONDS:
+            return cached[2]
+        token = await self._services.resolve_secret_ref(ref, operation=operation)
+        self._resolved_token = (ref, now, token)
+        return token
 
     def _request_url(self, path_or_url: str, operation: str, *, base_url: str | None = None) -> str:
         base_url = base_url or str(self.config.url)
@@ -986,6 +1153,34 @@ class NetBoxInventoryProvider(InventoryProvider):
             operation,
             retryable=False,
             safe_details={"max_response_bytes": cap},
+        )
+
+    async def _auth_failed(
+        self, response: httpx.Response, token: str | None, operation: str
+    ) -> InventoryProviderError:
+        """The error for a refused token, carrying NetBox's own reason where it gave one.
+
+        NetBox answers every refusal with a 403 and says why in ``detail``: an unknown
+        token, an expired or disabled one, a source address outside the token's allowed
+        IPs. Those are different fixes on the NetBox side, and the status code alone
+        cannot tell them apart, so the reason is worth the few bytes it costs to read.
+
+        Only a small prefix of the body is read (see :func:`_read_refusal_body`), and
+        only a string ``detail`` is kept: a proxy's HTML error page carries nothing to
+        report. See :func:`_refusal_detail` for what is done to the text before it is
+        shown.
+        """
+        detail = _refusal_detail(await _read_refusal_body(response), token)
+        safe_details: dict[str, Any] = {"status_code": response.status_code}
+        message = "NetBox authentication failed"
+        if detail:
+            safe_details["netbox_detail"] = detail
+            message = f"{message}: {detail}"
+        return self._error(
+            ProviderErrorCode.AUTH_FAILED,
+            message,
+            operation,
+            safe_details=safe_details,
         )
 
     def _client_error(self, response: httpx.Response, operation: str) -> InventoryProviderError:
