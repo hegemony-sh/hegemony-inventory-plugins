@@ -1536,6 +1536,50 @@ async def test_netbox_reads_a_family_only_the_instance_knows_about(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("endpoint", "plugin"),
+    [
+        ("/api/plugins/secrets/secrets/", "secrets"),
+        ("/api/plugins/secrets/user-keys/", "secrets"),
+        ("/api/plugins/netbox_secretstore/secrets/", "netbox_secretstore"),
+        # NetBox routes on the decoded path, so the check does too.
+        ("/api/plugins/%73ecrets/secrets/", "secrets"),
+    ],
+)
+async def test_a_credential_store_plugin_is_never_read_even_when_asked(
+    monkeypatch: pytest.MonkeyPatch, endpoint: str, plugin: str
+) -> None:
+    """A platform may still hold a mapping from a discovery made before the skip."""
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, json={"results": [], "next": None})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    mapping = ObjectFieldMapping(
+        object_type="secrets.secrets",
+        identity="id",
+        name_field="name",
+        field_map={"name": "name", "hash": "hash"},
+        source={"endpoint": endpoint},
+    )
+    with pytest.raises(InventoryProviderError) as refused:
+        await _provider(token="netbox-token").list_objects(
+            "secrets.secrets",
+            context=ProviderCallContext(
+                provider_id="netbox:primary",
+                operation="auto_sync_objects:secrets.secrets",
+                object_mapping=mapping,
+            ),
+        )
+
+    assert requested == []
+    assert refused.value.envelope.code == ProviderErrorCode.MALFORMED_QUERY
+    assert refused.value.envelope.safe_details == {"plugin": plugin}
+
+
+@pytest.mark.asyncio
 async def test_discovered_only_family_uses_its_instances_query_schema_for_tenant_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

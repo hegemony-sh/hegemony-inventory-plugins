@@ -10,13 +10,14 @@ import asyncio
 import builtins
 import hashlib
 import json
+import re
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any, cast
-from urllib.parse import ParseResult, quote, urlencode, urljoin, urlparse
+from urllib.parse import ParseResult, quote, unquote, urlencode, urljoin, urlparse
 
 import httpx
 
@@ -54,12 +55,26 @@ from .derive import (
 )
 from .filters import LOOKUP_SUFFIX as _SCOPE_LOOKUP_SUFFIX, intersect_queries as _intersect_queries
 from .object_types import ALL_OBJECT_TYPE_IDS, NetBoxObjectType, sources_for
+from .overlay import SKIP_PLUGINS
 
 KNOWN_AUTH_SCHEMES = frozenset({"bearer", "token", "basic"})
+_PLUGIN_PATH = re.compile(r"/api/plugins/(?P<app>[^/]+)/")
 # How much of a refused request's body is read for NetBox's reason, and how much of
 # that reason is kept. NetBox's own messages are one short sentence.
 _REFUSAL_BODY_MAX_BYTES = 4096
 _REFUSAL_DETAIL_MAX_CHARS = 300
+
+
+def _withheld_plugin(url: str) -> str | None:
+    """The credential-store plugin ``url`` reads from, if any; see :data:`.overlay.SKIP_PLUGINS`.
+
+    Matched on the decoded path, because NetBox routes on it: ``%73ecrets`` reaches the
+    same view as ``secrets``.
+    """
+    match = _PLUGIN_PATH.search(unquote(urlparse(url).path).lower())
+    if match is not None and match["app"] in SKIP_PLUGINS:
+        return match["app"]
+    return None
 
 
 def _query_to_expr(query: Mapping[str, Any] | None) -> str:
@@ -793,6 +808,17 @@ class NetBoxInventoryProvider(InventoryProvider):
         base_url = base_url or str(self.config.url)
         await self._services.validate_url(base_url, operation=context.operation)
         url = self._request_url(path_or_url, context.operation, base_url=base_url)
+        # Checked here, where every read passes, rather than where families are offered:
+        # the platform names the endpoint in the mapping it sends, and a mapping from a
+        # discovery made before a plugin was withheld still names it.
+        withheld = _withheld_plugin(url)
+        if withheld is not None:
+            raise self._error(
+                ProviderErrorCode.MALFORMED_QUERY,
+                f"NetBox plugin '{withheld}' stores credentials and is never read",
+                context.operation,
+                safe_details={"plugin": withheld},
+            )
         token = await self._services.resolve_secret_ref(
             self.config.token_ref, operation=context.operation
         )

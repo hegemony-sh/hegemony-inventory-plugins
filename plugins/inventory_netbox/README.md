@@ -347,6 +347,13 @@ Deliberately absent: **device and module bays** and **cable terminations**, whic
 structural placeholders rather than things anyone targets; and NetBox's own plumbing —
 webhooks, scripts, jobs, object changes — which is not inventory.
 
+Never offered and never read: **credential-store plugins**, netbox-secrets
+(`/api/plugins/secrets/`) and netbox-secretstore before it
+(`/api/plugins/netbox_secretstore/`). Their API serves a hash of every secret's value,
+and a copy in the inventory is something to attack the secrets with offline. The
+provider refuses a read of them even when the platform asks, so a mapping saved from an
+earlier discovery cannot bring them back.
+
 ### Devices and sites
 
 A NetBox device used to arrive twice: once through `query_devices`, with its site nested
@@ -606,6 +613,7 @@ happens. The table is what makes that mechanical when it is worth doing.
 | `KEEP_PROPERTIES` | 1 | A virtual chassis's member count is the fact, not a counter about other objects. |
 | `CONTENT_TYPES` | 2 | A model not named after its endpoint segment: `/api/virtualization/interfaces/` serves `VMInterface`, `/api/extras/tagged-objects/` serves `TaggedItem`. Custom fields are matched by the Django label, so a wrong one silently matches none. |
 | `SKIP_ENDPOINTS` | 24 | NetBox's own plumbing is not inventory. |
+| `SKIP_PLUGINS` | 2 | A credential-store plugin looks like any other plugin to a schema; only its contents say it must not be copied. |
 
 Everything else is derived, including the rules the written catalogue had to be
 corrected into following: a derived browse column never names a legacy spelling, and a

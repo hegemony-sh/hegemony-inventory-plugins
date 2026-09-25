@@ -403,6 +403,29 @@ def test_a_skipped_endpoint_is_never_offered() -> None:
     assert endpoints & DEFAULT_OVERLAY.skip_endpoints == set()
 
 
+def test_a_credential_store_plugin_is_never_offered() -> None:
+    """netbox-secrets serves every secret's hash; an inventory copy is an attack surface.
+
+    Each withheld path is given a real list endpoint's operations, so it would be
+    offered like any other plugin family if the skip did not hold, and a plugin that is
+    not a credential store is offered alongside to show the skip is that narrow.
+    """
+    schema = deepcopy(_SCHEMA)
+    operations = schema["paths"]["/api/tenancy/tenants/"]
+    withheld = {
+        "/api/plugins/secrets/secrets/",
+        "/api/plugins/secrets/user-keys/",
+        "/api/plugins/netbox_secretstore/secrets/",
+    }
+    for path in (*withheld, "/api/plugins/netbox_dns/records/"):
+        schema["paths"][path] = deepcopy(operations)
+
+    endpoints = {entry.endpoint for entry in derive_catalogue(schema).object_types}
+
+    assert endpoints & withheld == set()
+    assert "/api/plugins/netbox_dns/records/" in endpoints
+
+
 # ── Custom fields ─────────────────────────────────────────────────────────────
 
 

@@ -373,7 +373,10 @@ def _list_families(
     for path, operations in paths.items():
         if not isinstance(path, str) or path in overlay.skip_endpoints:
             continue
-        match = _LIST_ENDPOINT.match(path) or _PLUGIN_ENDPOINT.match(path)
+        plugin = _PLUGIN_ENDPOINT.match(path)
+        if plugin is not None and plugin["app"] in overlay.skip_plugins:
+            continue
+        match = _LIST_ENDPOINT.match(path) or plugin
         if match is None or not isinstance(operations, Mapping):
             continue
         component = _list_item_component(operations, index)
