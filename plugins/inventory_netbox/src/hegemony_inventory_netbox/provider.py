@@ -11,6 +11,7 @@ import builtins
 import hashlib
 import json
 import re
+import zlib
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass, field, replace
@@ -68,6 +69,83 @@ _TOKEN_REUSE_SECONDS = 300.0
 # that reason is kept. NetBox's own messages are one short sentence.
 _REFUSAL_BODY_MAX_BYTES = 4096
 _REFUSAL_DETAIL_MAX_CHARS = 300
+
+
+async def _read_refusal_body(response: httpx.Response) -> bytes:
+    """At most :data:`_REFUSAL_BODY_MAX_BYTES` of a refused response's body, decoded.
+
+    Read raw and inflated here rather than through ``aiter_bytes``, which decodes each
+    network chunk whole before handing it over, so a compressed chunk can expand to far
+    more than the cap before the cap is looked at. ``zlib`` is told how much it may
+    produce instead. An encoding other than gzip or deflate is not unpacked at all:
+    nothing in an error body is worth a decoder without that bound.
+
+    A response already read -- by a transport that buffers, as httpx's own test
+    responses do -- cannot be streamed again, and its decoding has already happened, so
+    what it holds is used as it is.
+    """
+    if response.is_stream_consumed:
+        try:
+            return response.content[:_REFUSAL_BODY_MAX_BYTES]
+        except httpx.ResponseNotRead:
+            return b""
+    encoding = response.headers.get("content-encoding", "").strip().lower()
+    if encoding in {"", "identity"}:
+        inflater = None
+    elif encoding in {"gzip", "x-gzip", "deflate"}:
+        # 32 + MAX_WBITS takes the gzip and the zlib wrapper alike.
+        inflater = zlib.decompressobj(32 + zlib.MAX_WBITS)
+    else:
+        return b""
+    body = bytearray()
+    try:
+        async for raw in response.aiter_raw():
+            # Never zero: the loop stops once the body is full, and zlib reads a
+            # max_length of zero as no limit at all.
+            room = _REFUSAL_BODY_MAX_BYTES - len(body)
+            body += raw[:room] if inflater is None else inflater.decompress(raw, room)
+            if len(body) >= _REFUSAL_BODY_MAX_BYTES:
+                break
+    except (httpx.HTTPError, zlib.error):
+        return b""
+    return bytes(body)
+
+
+def _refusal_detail(body: bytes, token: str | None) -> str | None:
+    """NetBox's ``detail`` string from a refused response's body, fit to show.
+
+    It lands in logs and in the sync history, so it is flattened to one line and cut
+    short, and the token is masked in case something in front of NetBox echoes the
+    header back. The masking comes first, on the text as it arrived: cut first, and a
+    token straddling the cut leaves its front half behind, which no longer matches the
+    whole token to be masked.
+    """
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if not isinstance(detail, str):
+        return None
+    for secret in _token_forms(token):
+        detail = detail.replace(secret, "***")
+    flattened = " ".join("".join(ch if ch.isprintable() else " " for ch in detail).split())
+    if len(flattened) > _REFUSAL_DETAIL_MAX_CHARS:
+        flattened = flattened[: _REFUSAL_DETAIL_MAX_CHARS - 1].rstrip() + "…"
+    return flattened or None
+
+
+def _token_forms(token: str | None) -> builtins.list[str]:
+    """Each form of ``token`` an echo could carry, longest first.
+
+    The token as stored, without the scheme it may be stored with, and a v2 token's
+    secret half (``nbt_<key>.<secret>``), which is what grants access even when echoed
+    on its own. Forms too short to be a secret are left alone rather than masked out of
+    ordinary words.
+    """
+    stripped = (token or "").strip()
+    forms = {stripped, stripped.partition(" ")[2].strip(), stripped.rpartition(".")[2]}
+    return sorted((form for form in forms if len(form) >= 8), key=len, reverse=True)
 
 
 def _is_readable_name(value: str) -> bool:
@@ -1087,14 +1165,12 @@ class NetBoxInventoryProvider(InventoryProvider):
         IPs. Those are different fixes on the NetBox side, and the status code alone
         cannot tell them apart, so the reason is worth the few bytes it costs to read.
 
-        Only a small prefix of the body is read, and only a string ``detail`` is kept: a
-        proxy's HTML error page carries nothing to report. The text is flattened to one
-        line and cut short because it lands in logs and in the sync history, and the
-        token is masked in case something in front of NetBox echoes the header back.
+        Only a small prefix of the body is read (see :func:`_read_refusal_body`), and
+        only a string ``detail`` is kept: a proxy's HTML error page carries nothing to
+        report. See :func:`_refusal_detail` for what is done to the text before it is
+        shown.
         """
-        detail = await self._refusal_detail(response)
-        if detail and token and token.strip():
-            detail = detail.replace(token.strip(), "***")
+        detail = _refusal_detail(await _read_refusal_body(response), token)
         safe_details: dict[str, Any] = {"status_code": response.status_code}
         message = "NetBox authentication failed"
         if detail:
@@ -1106,28 +1182,6 @@ class NetBoxInventoryProvider(InventoryProvider):
             operation,
             safe_details=safe_details,
         )
-
-    async def _refusal_detail(self, response: httpx.Response) -> str | None:
-        """NetBox's ``detail`` string from an error body, or ``None`` if there is none."""
-        body = b""
-        try:
-            async for chunk in response.aiter_bytes():
-                body += chunk
-                if len(body) >= _REFUSAL_BODY_MAX_BYTES:
-                    break
-        except httpx.HTTPError:
-            return None
-        try:
-            payload = json.loads(body[:_REFUSAL_BODY_MAX_BYTES])
-        except ValueError:
-            return None
-        detail = payload.get("detail") if isinstance(payload, dict) else None
-        if not isinstance(detail, str):
-            return None
-        flattened = " ".join("".join(ch if ch.isprintable() else " " for ch in detail).split())
-        if len(flattened) > _REFUSAL_DETAIL_MAX_CHARS:
-            flattened = flattened[: _REFUSAL_DETAIL_MAX_CHARS - 1].rstrip() + "…"
-        return flattened or None
 
     def _client_error(self, response: httpx.Response, operation: str) -> InventoryProviderError:
         status_code = response.status_code

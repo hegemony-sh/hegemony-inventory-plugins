@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import pathlib
+import tracemalloc
+import zlib
 from collections.abc import Callable
 from typing import Any
 
@@ -209,6 +212,8 @@ async def test_a_refused_token_is_looked_up_again(monkeypatch: pytest.MonkeyPatc
 async def test_a_token_is_not_reused_past_its_reuse_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A provider kept longer than a sync still picks up a rotated secret in time."""
+
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"results": [], "next": None})
 
@@ -1191,6 +1196,45 @@ async def test_the_reported_refusal_is_the_last_schemes(
 
 
 @pytest.mark.asyncio
+async def test_a_compressed_refusal_is_inflated_no_further_than_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Twenty kilobytes that inflate to twenty megabytes must cost kilobytes to refuse.
+
+    Decoding a whole network chunk before looking at the cap would build the whole
+    twenty megabytes first, which is the allocation this measures.
+    """
+    bomb = gzip.compress(b'{"detail": "' + b"x" * 20_000_000 + b'"}')
+    assert len(bomb) < 100_000
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403, stream=httpx.ByteStream(bomb), headers={"content-encoding": "gzip"}
+        )
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    provider = _provider({"auth_fallback_schemes": []}, token="netbox-token")
+    context = ProviderCallContext(provider_id="netbox:primary", operation="read_objects")
+    tracemalloc.start()
+    try:
+        with pytest.raises(InventoryProviderError) as refused:
+            await provider.list_objects("interface", limit=10, context=context)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # The cap cut the JSON short, so there is no reason to report -- and no megabytes.
+    assert refused.value.envelope.message == "NetBox authentication failed"
+    assert peak < 2_000_000
+
+
+# Shaped like a NetBox v2 token: nbt_<key>.<secret>.
+_V2_SECRET = "S3cr3tS3cr3tS3cr3tS3cr3tS3cr3tS3cr3tS3cr"
+_V2_TOKEN = f"nbt_K3yK3yK3yK3y.{_V2_SECRET}"
+_TOKEN_EXPIRED = json.dumps({"detail": "Token expired"}).encode()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("response", "expected_detail"),
     [
@@ -1203,10 +1247,46 @@ async def test_the_reported_refusal_is_the_last_schemes(
         (httpx.Response(403, json={"detail": "Invalid\r\ntoken\x1b[0m"}), "Invalid token [0m"),
         # Something in front of NetBox echoing the header must not echo the token.
         (
-            httpx.Response(403, json={"detail": "Rejected header: Bearer nbt_abc.def"}),
+            httpx.Response(403, json={"detail": f"Rejected header: Bearer {_V2_TOKEN}"}),
             "Rejected header: Bearer ***",
         ),
+        # Nor its secret half, which grants access on its own.
+        (httpx.Response(403, json={"detail": f"secret {_V2_SECRET}"}), "secret ***"),
+        # Masked before the cut: a token straddling it would otherwise leave its front.
+        (httpx.Response(403, json={"detail": "x" * 290 + " " + _V2_TOKEN}), "x" * 290 + " ***"),
         (httpx.Response(403, json={"detail": "x" * 1000}), "x" * 299 + "…"),
+        # Read as it streams, not only when already buffered.
+        (httpx.Response(403, stream=httpx.ByteStream(_TOKEN_EXPIRED)), "Token expired"),
+        # A proxy that compresses its error pages still reports NetBox's reason.
+        (
+            httpx.Response(
+                403,
+                stream=httpx.ByteStream(gzip.compress(_TOKEN_EXPIRED)),
+                headers={"content-encoding": "gzip"},
+            ),
+            "Token expired",
+        ),
+        (
+            httpx.Response(
+                403,
+                stream=httpx.ByteStream(zlib.compress(_TOKEN_EXPIRED)),
+                headers={"content-encoding": "deflate"},
+            ),
+            "Token expired",
+        ),
+        # An encoding nothing here unpacks with a bound, or a body that does not unpack.
+        (
+            httpx.Response(
+                403, stream=httpx.ByteStream(b"\x0b\x05"), headers={"content-encoding": "br"}
+            ),
+            None,
+        ),
+        (
+            httpx.Response(
+                403, stream=httpx.ByteStream(b"not gzip"), headers={"content-encoding": "gzip"}
+            ),
+            None,
+        ),
     ],
 )
 async def test_a_refusal_reason_is_kept_only_when_safe_to_show(
@@ -1214,12 +1294,14 @@ async def test_a_refusal_reason_is_kept_only_when_safe_to_show(
     response: httpx.Response,
     expected_detail: str | None,
 ) -> None:
+    """Every reason shown is NetBox's own text, on one line, short, and token-free."""
+
     async def handler(_request: httpx.Request) -> httpx.Response:
         return response
 
     _install_transport(monkeypatch, httpx.MockTransport(handler))
     with pytest.raises(InventoryProviderError) as refused:
-        await _provider({"auth_fallback_schemes": []}, token="nbt_abc.def").list_objects(
+        await _provider({"auth_fallback_schemes": []}, token=_V2_TOKEN).list_objects(
             "interface",
             limit=10,
             context=ProviderCallContext(provider_id="netbox:primary", operation="read_objects"),
@@ -1653,6 +1735,7 @@ _PEM = (
 async def test_a_name_that_is_not_a_name_gives_way_to_netboxs_display(
     monkeypatch: pytest.MonkeyPatch, value: str, display: str | None, expected: str
 ) -> None:
+    """The same on every read path: a listing, a paged listing and a single object."""
     record = {"id": 1, "public_key": value, "display": display, "user": "superadmin"}
 
     async def handler(request: httpx.Request) -> httpx.Response:
