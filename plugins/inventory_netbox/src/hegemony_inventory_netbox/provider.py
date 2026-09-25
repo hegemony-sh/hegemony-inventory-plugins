@@ -56,6 +56,10 @@ from .filters import LOOKUP_SUFFIX as _SCOPE_LOOKUP_SUFFIX, intersect_queries as
 from .object_types import ALL_OBJECT_TYPE_IDS, NetBoxObjectType, sources_for
 
 KNOWN_AUTH_SCHEMES = frozenset({"bearer", "token", "basic"})
+# How much of a refused request's body is read for NetBox's reason, and how much of
+# that reason is kept. NetBox's own messages are one short sentence.
+_REFUSAL_BODY_MAX_BYTES = 4096
+_REFUSAL_DETAIL_MAX_CHARS = 300
 
 
 def _query_to_expr(query: Mapping[str, Any] | None) -> str:
@@ -808,8 +812,9 @@ class NetBoxInventoryProvider(InventoryProvider):
                     headers = {"Authorization": authorization} if authorization else {}
                     try:
                         # Streamed rather than fetched whole: the status arrives before
-                        # the body does, so an error response is never read at all, and
-                        # a success is read under the cap in _read_capped.
+                        # the body does, so an error response is read only as far as
+                        # _auth_failed needs, and a success is read under the cap in
+                        # _read_capped.
                         async with client.stream(method, url, headers=headers) as resp:
                             if (
                                 resp.status_code in {401, 403}
@@ -817,11 +822,12 @@ class NetBoxInventoryProvider(InventoryProvider):
                             ):
                                 continue
                             if resp.status_code in {401, 403}:
-                                raise self._error(
-                                    ProviderErrorCode.AUTH_FAILED,
-                                    "NetBox authentication failed",
-                                    context.operation,
-                                )
+                                # The last scheme's answer is the one reported: NetBox
+                                # reads the token version from the token itself, so on a
+                                # release that knows both schemes they answer alike, and
+                                # on one that knows only the fallback it is the fallback
+                                # that says why.
+                                raise await self._auth_failed(resp, token, context.operation)
                             if resp.status_code == 404:
                                 raise self._error(
                                     ProviderErrorCode.NOT_FOUND,
@@ -987,6 +993,58 @@ class NetBoxInventoryProvider(InventoryProvider):
             retryable=False,
             safe_details={"max_response_bytes": cap},
         )
+
+    async def _auth_failed(
+        self, response: httpx.Response, token: str | None, operation: str
+    ) -> InventoryProviderError:
+        """The error for a refused token, carrying NetBox's own reason where it gave one.
+
+        NetBox answers every refusal with a 403 and says why in ``detail``: an unknown
+        token, an expired or disabled one, a source address outside the token's allowed
+        IPs. Those are different fixes on the NetBox side, and the status code alone
+        cannot tell them apart, so the reason is worth the few bytes it costs to read.
+
+        Only a small prefix of the body is read, and only a string ``detail`` is kept: a
+        proxy's HTML error page carries nothing to report. The text is flattened to one
+        line and cut short because it lands in logs and in the sync history, and the
+        token is masked in case something in front of NetBox echoes the header back.
+        """
+        detail = await self._refusal_detail(response)
+        if detail and token and token.strip():
+            detail = detail.replace(token.strip(), "***")
+        safe_details: dict[str, Any] = {"status_code": response.status_code}
+        message = "NetBox authentication failed"
+        if detail:
+            safe_details["netbox_detail"] = detail
+            message = f"{message}: {detail}"
+        return self._error(
+            ProviderErrorCode.AUTH_FAILED,
+            message,
+            operation,
+            safe_details=safe_details,
+        )
+
+    async def _refusal_detail(self, response: httpx.Response) -> str | None:
+        """NetBox's ``detail`` string from an error body, or ``None`` if there is none."""
+        body = b""
+        try:
+            async for chunk in response.aiter_bytes():
+                body += chunk
+                if len(body) >= _REFUSAL_BODY_MAX_BYTES:
+                    break
+        except httpx.HTTPError:
+            return None
+        try:
+            payload = json.loads(body[:_REFUSAL_BODY_MAX_BYTES])
+        except ValueError:
+            return None
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if not isinstance(detail, str):
+            return None
+        flattened = " ".join("".join(ch if ch.isprintable() else " " for ch in detail).split())
+        if len(flattened) > _REFUSAL_DETAIL_MAX_CHARS:
+            flattened = flattened[: _REFUSAL_DETAIL_MAX_CHARS - 1].rstrip() + "…"
+        return flattened or None
 
     def _client_error(self, response: httpx.Response, operation: str) -> InventoryProviderError:
         status_code = response.status_code

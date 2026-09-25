@@ -1048,6 +1048,102 @@ async def test_a_refused_connection_test_reports_the_error_and_no_details(
 
 
 @pytest.mark.asyncio
+async def test_a_refused_token_reports_netboxs_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 403 alone cannot tell a wrong token from an allowed-IPs miss; NetBox's detail can."""
+    reason = "Source IP ::ffff:192.168.20.27 is not permitted to authenticate using this token."
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"detail": reason})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    result = await _provider(token="nbt_abc.def").test_connection(
+        context=ProviderCallContext(
+            provider_id="netbox:primary",
+            operation="test_connection",
+            query_hash="status",
+            config_version=1,
+        )
+    )
+
+    assert result.ok is False
+    assert result.message == f"NetBox authentication failed: {reason}"
+    assert result.error is not None
+    assert result.error["code"] == ProviderErrorCode.AUTH_FAILED.value
+    assert result.error["safe_details"] == {"status_code": 403, "netbox_detail": reason}
+
+
+@pytest.mark.asyncio
+async def test_the_reported_refusal_is_the_last_schemes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A release that knows only ``Token`` ignores ``Bearer``; the fallback says why."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("authorization", "").startswith("Bearer "):
+            return httpx.Response(
+                403, json={"detail": "Authentication credentials were not provided."}
+            )
+        return httpx.Response(403, json={"detail": "Token expired"})
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    with pytest.raises(InventoryProviderError) as refused:
+        await _provider(token="netbox-token").list_objects(
+            "interface",
+            limit=10,
+            context=ProviderCallContext(provider_id="netbox:primary", operation="read_objects"),
+        )
+
+    assert refused.value.envelope.message == "NetBox authentication failed: Token expired"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "expected_detail"),
+    [
+        # A proxy's error page: nothing NetBox said, so nothing to report.
+        (httpx.Response(403, text="<html><body>Forbidden</body></html>"), None),
+        (httpx.Response(401, json={"detail": ["not", "a", "string"]}), None),
+        (httpx.Response(403, json=["no", "object"]), None),
+        (httpx.Response(403, json={"detail": "  "}), None),
+        # Flattened to one line, so a log line stays one line.
+        (httpx.Response(403, json={"detail": "Invalid\r\ntoken\x1b[0m"}), "Invalid token [0m"),
+        # Something in front of NetBox echoing the header must not echo the token.
+        (
+            httpx.Response(403, json={"detail": "Rejected header: Bearer nbt_abc.def"}),
+            "Rejected header: Bearer ***",
+        ),
+        (httpx.Response(403, json={"detail": "x" * 1000}), "x" * 299 + "…"),
+    ],
+)
+async def test_a_refusal_reason_is_kept_only_when_safe_to_show(
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response,
+    expected_detail: str | None,
+) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return response
+
+    _install_transport(monkeypatch, httpx.MockTransport(handler))
+    with pytest.raises(InventoryProviderError) as refused:
+        await _provider({"auth_fallback_schemes": []}, token="nbt_abc.def").list_objects(
+            "interface",
+            limit=10,
+            context=ProviderCallContext(provider_id="netbox:primary", operation="read_objects"),
+        )
+
+    envelope = refused.value.envelope
+    assert envelope.code == ProviderErrorCode.AUTH_FAILED
+    assert envelope.safe_details.get("netbox_detail") == expected_detail
+    assert envelope.safe_details["status_code"] == response.status_code
+    if expected_detail is None:
+        assert envelope.message == "NetBox authentication failed"
+    else:
+        assert envelope.message == f"NetBox authentication failed: {expected_detail}"
+
+
+@pytest.mark.asyncio
 async def test_a_netbox_that_answers_status_with_less_still_passes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
