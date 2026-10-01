@@ -14,10 +14,9 @@ Standalone release repo for Hegemony inventory plugin packages:
 The SDK and all provider wheels are released together under one semver tag such as
 `v0.1.0`, cut automatically when a releasable change merges to `main`. Provider wheels depend on the exact SDK version from the same release.
 
-Public source is licensed under `AGPL-3.0-or-later`; commercial licenses may be
-available separately. See [Licensing](LICENSING.md).
+Licensed under `AGPL-3.0-or-later`. See [Licensing](LICENSING.md).
 
-Contributions require the [Hegemony Contributor License Agreement](CLA.md). See
+Every commit needs a DCO sign-off (`git commit -s`). See
 [Contributing](CONTRIBUTING.md).
 
 ## Install From A Release
