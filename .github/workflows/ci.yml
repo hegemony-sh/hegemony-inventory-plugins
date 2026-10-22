@@ -26,6 +26,14 @@ env:
 # workflow back if the self-hosted host is down. The release workflow is not
 # included on purpose: it writes the release token into its workspace, which
 # must not outlive the job on a non-ephemeral runner.
+#
+# Warning for a public repository: pull requests from forks run this workflow,
+# and a self-hosted runner executes whatever a pull request's workflow asks of
+# it on our own host (the platform's runner host shares one Docker daemon and
+# has passwordless sudo). Either leave CI_RUNNER unset, which keeps every job on
+# GitHub-hosted runners, or keep the runners and require approval for all
+# outside collaborators in the repository's Actions settings. Nothing in this
+# workflow needs the self-hosted host.
 jobs:
   commit-lint:
     name: Lint Commit Messages
@@ -42,6 +50,48 @@ jobs:
       - uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6
         with:
           configFile: commitlint.config.mjs
+
+  # The pre-commit hook scans staged changes locally, which nothing enforces for
+  # a contributor who skips pre-commit. This scans the commits the pull request
+  # (or push) adds, with the same gitleaks version as the hook. It installs the
+  # release binary and checks it against the digest the gitleaks project
+  # publishes with it, rather than using the gitleaks-action, which needs a
+  # licence key for organization repositories.
+  secret-scan:
+    name: Scan Commits For Secrets (gitleaks)
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # gitleaks reads the commits the pull request or push adds.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.21.2"
+          GITLEAKS_SHA256: 5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba
+        run: |
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -sSfL -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+
+      - name: Scan the new commits for secrets
+        env:
+          RANGE_START: ${{ github.event.pull_request.base.sha || github.event.before }}
+          RANGE_END: ${{ github.event.pull_request.head.sha || github.sha }}
+        # A push that creates the branch reports an all-zero `before`; with
+        # nothing to diff against, the scan reads the pushed commit alone.
+        run: |
+          if [ -z "${RANGE_START//0/}" ]; then
+            log_opts="-1 $RANGE_END"
+          else
+            log_opts="$RANGE_START..$RANGE_END"
+          fi
+          "$RUNNER_TEMP/gitleaks" git --log-opts="$log_opts" --redact --no-banner .
 
   lint-test-build:
     name: Lint, Test, Build Wheels
