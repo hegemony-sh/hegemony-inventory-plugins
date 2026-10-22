@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+# SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -71,7 +72,8 @@ _HELPERS = {
     "object": "_json",
 }
 
-HEADER = '''# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+HEADER = '''# SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
