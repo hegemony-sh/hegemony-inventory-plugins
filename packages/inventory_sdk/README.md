@@ -15,12 +15,13 @@ exposes a `register(registry)` callable under the `hegemony.inventory_plugins`
 entry-point group:
 
 ```toml
-# In your plugin's pyproject.toml
+# In your plugin's pyproject.toml. The SDK is 0.x, where a breaking change
+# releases a new minor version, so depend on one minor at a time.
+[project]
+dependencies = ["hegemony-inventory-sdk>=0.4.1,<0.5"]
+
 [project.entry-points."hegemony.inventory_plugins"]
 my_plugin = "my_plugin:register"
-
-[project.dependencies]
-hegemony-inventory-sdk = ">=0.1,<0.2"
 ```
 
 ```python

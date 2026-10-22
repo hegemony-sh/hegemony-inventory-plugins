@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# The platform repository names the @hegemony-sh/maintainers team here. This
+# repository names the account that administers it, because that is the one
+# owner that is certain to exist and to have write access. Replace it with the
+# team once the team has write access to this repository.
+*       @tvarohohlavy
+
+# The paths that decide what is released and who may release it.
+/.github/workflows/    @tvarohohlavy
+/.github/CODEOWNERS    @tvarohohlavy
+/.releaserc.json       @tvarohohlavy
+/SECURITY.md           @tvarohohlavy

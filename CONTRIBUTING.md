@@ -27,10 +27,55 @@ the agent and submits the work, as its author; the agent is credited in a
 platform's
 [CONTRIBUTING.md](https://github.com/hegemony-sh/hegemony/blob/develop/CONTRIBUTING.md#licensing-and-dco).
 
+## Code of conduct
+
+Everyone taking part in this project is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Reporting security issues
+
+Do not open a public issue for a vulnerability, a suspected vulnerability or a
+leaked secret. Report it privately, as [SECURITY.md](SECURITY.md) describes.
+
+## Development
+
+The [README](README.md#development) sets up the workspace and the pre-commit
+hooks, and [Local checkout layout](README.md#local-checkout-layout) places this
+repository beside the platform. [Task](https://taskfile.dev/) is optional; these
+are the commands of the `Lint, Test, Build Wheels` CI job, in this order:
+
+```bash
+uv sync --frozen --all-packages
+uv run ruff check packages plugins tests scripts
+uv run ruff format --check packages plugins tests scripts
+uv run reuse lint
+uv run ty check
+uv run python scripts/generate_catalogue.py --check
+uv run pytest
+uv run python scripts/build_wheels.py
+uv run python scripts/smoke_install_wheels.py
+```
+
+A new file carries an SPDX copyright and licence header, copied from an existing
+file, so that `reuse lint` passes; see [LICENSING.md](LICENSING.md). Test fixtures
+use example hosts (`netbox.example`, `192.0.2.0/24`, RFC 1918 addresses) and
+synthetic tokens, never real hosts, addresses or credentials.
+
+## Commit messages and pull requests
+
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/),
+checked by commitlint (`commitlint.config.mjs`) on every pull request. A scope is
+optional and free-form: lower-case letters, digits and single dashes, at most 20
+characters, comma-separated without spaces (`netbox`, `sdk,docs`).
+
+Open pull requests against `main`, one change each. A merged `feat`, `fix`, `perf`
+or `revert` commit releases a new version (see [Releasing](#releasing) below), so
+write its subject for the changelog.
+
 ## Releasing
 
 A merge to `main` is a release. The `Release` workflow calls the shared
-[`plugin-release.yml`](https://github.com/hegemony-sh/hegemony-workflows)
+[`plugin-release.yml`](https://github.com/hegemony-sh/hegemony-github-workflows)
 workflow, which runs [semantic-release](https://semantic-release.gitbook.io/):
 it reads the Conventional Commits since the last tag, derives the next
 version from them, bumps every package and SDK pin (`scripts/set_version.py`),
@@ -55,15 +100,16 @@ release a minor.
 Releases are immutable. The pipeline refuses to run when a GitHub Release for
 the next tag already exists and never replaces published assets: fix forward
 with a new commit, which becomes the next release. Attestations are created
-only for public repositories, so releases cut while this repository is
-private ship checksums only.
+only for public repositories, so a release cut while this repository was private
+has no attestation, only `SHA256SUMS`. That file is published in the same
+release as the wheels, so it checks integrity but not provenance.
 
 One failure a re-run cannot repair: semantic-release pushes the release
 commit and the `vX.Y.Z` tag before it publishes the GitHub Release, so if
 publication fails after that push the tag exists without a Release, and the
 next run reads the tag as the last release. Publish that tag's assets by hand
 from a checkout of the tag, as the shared workflow's
-[README](https://github.com/hegemony-sh/hegemony-workflows#recovering-a-tag-without-a-release)
+[README](https://github.com/hegemony-sh/hegemony-github-workflows#recovering-a-tag-without-a-release)
 describes (`gh release create vX.Y.Z --verify-tag ... dist/*.whl
 dist/SHA256SUMS` after rebuilding the wheels at that tag).
 

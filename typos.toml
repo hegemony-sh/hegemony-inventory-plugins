@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# typos configuration - https://github.com/crate-ci/typos
+# Add false positives here
+
+[files]
+extend-exclude = [
+    # Recorded NetBox OpenAPI documents (see REUSE.toml): their choice values are
+    # spelled the way NetBox serves them, for example `hpe-synergy-interconnect-link`
+    # (HPE, the vendor), which the hook would "correct" to `hope-...` and so break
+    # the conformance test that reads them. Anchored with a leading slash, because
+    # these patterns are gitignore-shaped and a bare `fixtures/` matches at any depth.
+    "/tests/fixtures/",
+]
+
+[default]
+extend-ignore-identifiers-re = [
+    # An all-caps keyword carrying an English suffix -- ANDed, ORed. typos splits
+    # these at the case boundary, so it checks the caps run MINUS its last letter
+    # (ANDed is read as `AN` + `Ded`) and "corrects" the second half to `Dead`,
+    # which the pre-commit hook then writes into the README and a source comment.
+    # Ignore the shape rather than the words.
+    "[A-Z]{2,}[a-z]{1,4}",
+]
