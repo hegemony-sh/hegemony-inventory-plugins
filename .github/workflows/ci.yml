@@ -51,16 +51,19 @@ jobs:
         with:
           configFile: commitlint.config.mjs
 
-  # The pre-commit hook scans staged changes locally, which nothing enforces for
-  # a contributor who skips pre-commit. This scans the commits the pull request
-  # (or push) adds, with the same gitleaks version as the hook. It installs the
-  # release binary and checks it against the digest the gitleaks project
-  # publishes with it, rather than using the gitleaks-action, which needs a
+  # The secret scan and the workflow policy scan used to run only as local
+  # pre-commit hooks, which nothing enforces for a contributor who skips them
+  # or for a pull request from a fork. Same checks and versions as the hooks in
+  # .pre-commit-config.yaml; the platform repository's security-scans job does
+  # the same. gitleaks is the release binary, checked against the digest the
+  # gitleaks project publishes with it, not the gitleaks-action, which needs a
   # licence key for organization repositories.
-  secret-scan:
-    name: Scan Commits For Secrets (gitleaks)
+  security-scans:
+    name: Security Scans (gitleaks, zizmor)
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 10
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -93,6 +96,16 @@ jobs:
             log_opts="$RANGE_START..$RANGE_END"
           fi
           "$RUNNER_TEMP/gitleaks" git --log-opts="$log_opts" --redact --no-banner .
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7
+        with:
+          version: "0.9.28"
+
+      # Offline, as the pre-commit hook runs without a GitHub token; the online
+      # audits would also need one here.
+      - name: GitHub Actions policy scan (zizmor)
+        run: uvx zizmor@1.22.0 --offline --config .github/zizmor.yml .github/workflows
 
   lint-test-build:
     name: Lint, Test, Build Wheels
