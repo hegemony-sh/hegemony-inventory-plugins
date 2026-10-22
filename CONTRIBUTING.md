@@ -12,11 +12,12 @@ This repository is part of the Hegemony project. Its source is licensed under
 contributing it transfers no copyright to the project. There is no Contributor
 License Agreement.
 
-The project's own files name Rexonix s.r.o. as the copyright holder and Jakub
-Trávník as the author (see [LICENSING.md](LICENSING.md)). If you do not write on
-behalf of Rexonix s.r.o., you keep the copyright in your contribution and may add
-your own `SPDX-FileCopyrightText` line to the header of a file you change, as
-REUSE recommends.
+The project's own files name Rexonix s.r.o. as the copyright holder, and those
+with an SPDX header also name Jakub Trávník as the author (see
+[LICENSING.md](LICENSING.md)). If you do not write on behalf of Rexonix s.r.o.,
+you keep the copyright in your contribution and may add your own
+`SPDX-FileCopyrightText` line to the header of a file you change, as REUSE
+recommends.
 
 Every commit must be signed off under the
 [Developer Certificate of Origin](https://developercertificate.org/) (DCO),
@@ -68,8 +69,8 @@ file, so that `reuse lint` passes; see [LICENSING.md](LICENSING.md). Test fixtur
 use example hosts (`netbox.example`, `192.0.2.0/24`, RFC 1918 addresses) and
 synthetic tokens, never real hosts, addresses or credentials.
 
-A first-party file names Rexonix s.r.o. as the copyright holder and Jakub Trávník
-as the author, in the file's own comment syntax:
+A first-party file with an SPDX header names Rexonix s.r.o. as the copyright
+holder and Jakub Trávník as the author, in the file's own comment syntax:
 
 <!-- REUSE-IgnoreStart -->
 
