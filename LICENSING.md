@@ -33,6 +33,12 @@ Keep first-party source code SPDX identifiers as
 SPDX-License-Identifier: AGPL-3.0-or-later
 ```
 
+Every wheel carries the texts of its licences. Its `pyproject.toml` declares an
+SPDX expression and `license-files`, and holds a copy of each named text from
+`LICENSES/` as `LICENSE-<id>.txt`, which an installed wheel keeps under
+`*.dist-info/licenses/`. `scripts/package_licenses.py` writes the copies;
+`task licenses:packages`, a test and the wheel smoke install check them.
+
 ## Code of Conduct
 
 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) adapts Contributor Covenant 2.1 by
