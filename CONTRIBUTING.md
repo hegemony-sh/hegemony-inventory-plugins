@@ -38,7 +38,9 @@ platform's
 ## Code of conduct
 
 Everyone taking part in this project is expected to follow the
-[Code of Conduct](CODE_OF_CONDUCT.md).
+[Code of Conduct](CODE_OF_CONDUCT.md). This adapted third-party document retains
+CC-BY-4.0; preserve its attribution and license when editing it. The code
+licensing and contribution rules above continue to apply to code.
 
 ## Reporting security issues
 
