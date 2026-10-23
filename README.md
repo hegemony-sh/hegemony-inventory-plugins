@@ -10,6 +10,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 [![CI](https://github.com/hegemony-sh/hegemony-inventory-plugins/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/hegemony-sh/hegemony-inventory-plugins/actions/workflows/ci.yml)
 [![REUSE status](https://api.reuse.software/badge/github.com/hegemony-sh/hegemony-inventory-plugins)](https://api.reuse.software/info/github.com/hegemony-sh/hegemony-inventory-plugins)
 [![Latest release](https://img.shields.io/github/v/release/hegemony-sh/hegemony-inventory-plugins?label=Release)](CHANGELOG.md)
+[![FOSSA license scan](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-inventory-plugins.svg?type=shield&issueType=license)](https://app.fossa.com/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-inventory-plugins?ref=badge_shield&issueType=license)
+[![FOSSA security scan](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-inventory-plugins.svg?type=shield&issueType=security)](https://app.fossa.com/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-inventory-plugins?ref=badge_shield&issueType=security)
 
 Inventory SDK and provider plugin wheels for
 [Hegemony](https://github.com/hegemony-sh/hegemony), the self-hosted,
