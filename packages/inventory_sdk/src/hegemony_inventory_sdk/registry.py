@@ -43,8 +43,6 @@ class InventoryPluginRegistry(Protocol):
         default_config: dict[str, Any] | None = None,
     ) -> None:
         """Register an inventory provider type."""
-        ...
 
     def register_object_type(self, spec: ObjectTypeSpec) -> None:
         """Register an inventory object type."""
-        ...

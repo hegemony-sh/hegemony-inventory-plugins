@@ -63,11 +63,9 @@ class PlatformServices(Protocol):
 
     async def resolve_secret_ref(self, ref: SecretRef | None, *, operation: str) -> str | None:
         """Resolve an opaque secret reference to its value (platform-side)."""
-        ...
 
     async def validate_url(self, url: str, *, operation: str) -> str:
         """Validate an http(s) provider URL against SSRF allow-lists; returns the host."""
-        ...
 
     def validate_access_config(
         self,
@@ -77,4 +75,3 @@ class PlatformServices(Protocol):
         allow_raw_literals: bool = False,
     ) -> dict[str, Any]:
         """Validate scoped access-config refs are protected templates (fail-closed)."""
-        ...
