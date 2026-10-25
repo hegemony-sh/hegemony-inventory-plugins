@@ -1,3 +1,11 @@
+## [0.4.2](https://github.com/hegemony-sh/hegemony-inventory-plugins/compare/v0.4.1...v0.4.2) (2026-10-25)
+
+### Bug Fixes
+
+* **deps:** upgrade virtualenv to 21.14.13 for GHSA-cx6f-vjhg-g3cc ([d170da5](https://github.com/hegemony-sh/hegemony-inventory-plugins/commit/d170da5961a701b0b915a5be2ab95ec647238a5f))
+* **packaging:** ship the AGPL-3.0 text in every wheel ([113a8b9](https://github.com/hegemony-sh/hegemony-inventory-plugins/commit/113a8b927b3384f4b5191432828a06e346b4feb3))
+* **release:** stop release comments from failing a published release ([2f133f3](https://github.com/hegemony-sh/hegemony-inventory-plugins/commit/2f133f35d39157689507936c1d255d9ada6c604d))
+
 ## [0.4.1](https://github.com/hegemony-sh/hegemony-inventory-plugins/compare/v0.4.0...v0.4.1) (2026-09-25)
 
 ### Bug Fixes

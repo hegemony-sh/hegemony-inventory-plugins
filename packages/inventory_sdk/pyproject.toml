@@ -5,7 +5,7 @@
 
 [project]
 name = "hegemony-inventory-sdk"
-version = "0.4.1"
+version = "0.4.2"
 description = "Public SDK for Hegemony inventory provider and object-type plugins"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
