@@ -263,3 +263,5 @@ available for trying the lockstep bump locally.
 - Report vulnerabilities privately, as described in
   [Security](SECURITY.md); do not open a public issue for them.
 - Licensed under `AGPL-3.0-or-later`. See [Licensing](LICENSING.md).
+
+[![FOSSA license report](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-inventory-plugins.svg?type=large&issueType=license)](https://app.fossa.com/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-inventory-plugins?ref=badge_large&issueType=license)
