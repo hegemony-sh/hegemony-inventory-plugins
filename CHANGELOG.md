@@ -70,8 +70,6 @@ a vehicle -- auth headers, the retry ladder, off-origin pagination, error mappin
 -- are rewritten against a family that still reads, because those guarantees did
 not go anywhere.
 
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_016rQ9u3TYex2dXFfy2isnzL
 
 ### Features
 

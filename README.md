@@ -1,6 +1,6 @@
 <!--
 SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
-SPDX-FileContributor: Jakub Travnik <jakub.travnik@gmail.com>
+SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
 SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 
@@ -9,7 +9,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
 [![CI](https://github.com/hegemony-sh/hegemony-inventory-plugins/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/hegemony-sh/hegemony-inventory-plugins/actions/workflows/ci.yml)
 [![REUSE status](https://api.reuse.software/badge/github.com/hegemony-sh/hegemony-inventory-plugins)](https://api.reuse.software/info/github.com/hegemony-sh/hegemony-inventory-plugins)
-[![Latest release](https://img.shields.io/github/v/release/hegemony-sh/hegemony-inventory-plugins?label=Release)](CHANGELOG.md)
+[![Latest release](https://img.shields.io/github/v/release/hegemony-sh/hegemony-inventory-plugins?label=Release)](https://github.com/hegemony-sh/hegemony-inventory-plugins/releases)
 [![FOSSA license scan](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-inventory-plugins.svg?type=shield&issueType=license)](https://app.fossa.com/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-inventory-plugins?ref=badge_shield&issueType=license)
 [![FOSSA security scan](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-inventory-plugins.svg?type=shield&issueType=security)](https://app.fossa.com/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-inventory-plugins?ref=badge_shield&issueType=security)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hegemony-sh/hegemony-inventory-plugins/badge)](https://scorecard.dev/viewer/?uri=github.com/hegemony-sh/hegemony-inventory-plugins)
@@ -32,8 +32,8 @@ ships as opt-in wheels:
 | `hegemony-inventory-netbox` | [`plugins/inventory_netbox`](plugins/inventory_netbox) | Reads devices, sites and other object families from a NetBox instance over its REST API. |
 | `hegemony-inventory-git` | [`plugins/inventory_git`](plugins/inventory_git) | Reads devices and sites from YAML files in a Git repository you already manage. |
 
-The SDK and all provider wheels are released together under one semver tag such
-as `v0.4.1`, cut automatically when a releasable change merges to `main`.
+The SDK and all provider wheels are released together under one semver tag,
+`vX.Y.Z`, cut automatically when a releasable change merges to `main`.
 Provider wheels depend on the exact SDK version from the same release. The
 packages are `0.x`: while the major version is 0, a breaking change releases a
 new minor version (see [Contributing](CONTRIBUTING.md#releasing)).
@@ -73,7 +73,7 @@ new minor version (see [Contributing](CONTRIBUTING.md#releasing)).
 Provider wheels are opt-in. Hegemony images already include the matching
 `hegemony-inventory-sdk` in `/opt/venv`, while provider wheels are installed only in
 deployments that need them. Install the release that the Hegemony version you run
-pins in its `.github/plugin-pins.json`.
+pins in its `.github/plugin-pins.json` (see [Compatibility](#compatibility)).
 
 The API process discovers provider entry points and runs inventory syncs, so install
 providers into each API container that should serve those providers. Restart the API after
@@ -85,7 +85,7 @@ installing them. The example installs all providers; remove any wheel names for 
 that deployment should not enable.
 
 ```bash
-VERSION=0.4.1   # a release tag without the leading v, from the Releases page
+VERSION=X.Y.Z   # a release tag without the leading v; see Compatibility
 API_CONTAINER=<your API container name>
 
 docker exec -u root -it "${API_CONTAINER}" bash -lc "
@@ -112,7 +112,7 @@ docker restart "${API_CONTAINER}"
 For development, use the same release flow against the dev API container:
 
 ```bash
-VERSION=0.4.1
+VERSION=X.Y.Z
 API_CONTAINER=hegemony-dev-api-1
 # then run the same docker exec install block above
 ```
@@ -139,6 +139,19 @@ docker restart "${API_CONTAINER}"
 
 These Docker-command installs are runtime changes. Re-run them after recreating the API
 container or replacing the image.
+
+## Compatibility
+
+Each Hegemony release pins one release of this repository in its
+`.github/plugin-pins.json` and is built and tested against exactly that
+release. Install the release your platform pins; the newest one is on the
+[Releases page](https://github.com/hegemony-sh/hegemony-inventory-plugins/releases).
+
+| Hegemony | hegemony-inventory-plugins |
+| --- | --- |
+| 1.0.0 | 0.4.2 |
+
+Hegemony versions before 1.0.0 were not released publicly.
 
 ## Develop a provider
 
