@@ -85,6 +85,26 @@ holder and Jakub Trávník as the author, in the file's own comment syntax:
 
 <!-- REUSE-IgnoreEnd -->
 
+### Fuzzing
+
+`fuzz/*_fuzzer.py` are [Atheris](https://github.com/google/atheris) fuzz
+targets for code that reads what an operator or an inventory system supplies:
+the NetBox filter conjunction, which must never drop a configured
+restriction, and the SDK's object-type ids and record paths. On every pull
+request, the ClusterFuzzLite workflow (`.github/workflows/cflite_pr.yml`)
+builds them with `.clusterfuzzlite/` and runs them for a few minutes; a crash
+fails the check, and the run keeps the input that caused it. Each target
+asserts the function's documented contract (only its own error, never another
+exception), so a new target is a short file beside the others. To run one
+locally, build the image and the fuzzers:
+
+```bash
+docker build -t cflite -f .clusterfuzzlite/Dockerfile .
+docker run --rm -e SANITIZER=address -e FUZZING_LANGUAGE=python \
+  -v "$PWD/build/fuzz:/out" cflite compile
+docker run --rm -v "$PWD/build/fuzz:/out" cflite /out/netbox_filters_fuzzer -max_total_time=60
+```
+
 ## Commit messages and pull requests
 
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/),
