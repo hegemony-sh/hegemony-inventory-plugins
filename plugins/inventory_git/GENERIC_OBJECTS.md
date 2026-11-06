@@ -92,6 +92,12 @@ it were the external ID. Relationships do not implicitly create filter attribute
 Discover the configured provider to populate the existing object-type selection,
 or let sync discover it. Each sync parses and validates one locked checkout into
 memory, then uses that snapshot for discovery, legacy reads, and generic pages.
+The host must construct a fresh provider instance for each sync, discover on that
+instance before reading, and discard the instance afterwards. The cached snapshot
+belongs to that instance; pooling instances across syncs is unsupported. Core's
+host-only regression test
+`test_each_sync_builds_a_fresh_provider_and_discovers_before_reads` enforces this
+contract through the real registry, without requiring this optional plugin.
 The object source metadata records its Git commit. Discovery's source version is
 a deterministic definition fingerprint, so record-only edits do not change it.
 
