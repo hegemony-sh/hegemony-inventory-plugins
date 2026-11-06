@@ -662,13 +662,9 @@ async def test_git_provider_device_can_override_the_default_jump_host(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_a_provider_that_does_not_discover_says_so(tmp_path: Path) -> None:
-    """Discovery is opt-in, and a source of truth with a fixed shape opts out.
-
-    A Git inventory serves exactly the object types this plugin was written for -- there
-    is no instance-specific answer to give -- so it neither declares the capability nor
-    implements the method, and the SDK's default says exactly that.
-    """
+async def test_legacy_inventory_discovers_no_generic_types(tmp_path: Path) -> None:
+    """Discovery preserves legacy entry points without duplicating their objects."""
+    (tmp_path / "inventory").mkdir()
     provider = GitInventoryProvider(
         provider_id="git:primary",
         config={"git_repo_id": str(uuid4()), "path": "inventory"},
@@ -678,14 +674,13 @@ async def test_a_provider_that_does_not_discover_says_so(tmp_path: Path) -> None
             git=FakeGitFetcher(path=str(tmp_path)),
         ),
     )
-    assert Capability.DISCOVER not in provider.capabilities
-    with pytest.raises(InventoryProviderError) as raised:
-        await provider.discover(
-            context=ProviderCallContext(provider_id=provider.id, operation="discover")
-        )
-    assert raised.value.envelope.code == ProviderErrorCode.MALFORMED_QUERY
-    assert raised.value.envelope.retryable is False
-    assert "discover" in raised.value.envelope.message
+    assert Capability.DISCOVER in provider.capabilities
+    result = await provider.discover(
+        context=ProviderCallContext(provider_id=provider.id, operation="discover")
+    )
+    assert result.object_types == ()
+    assert result.bindings == ()
+    assert result.mappings == {}
 
 
 def test_device_facts_flow_through_attributes_only():

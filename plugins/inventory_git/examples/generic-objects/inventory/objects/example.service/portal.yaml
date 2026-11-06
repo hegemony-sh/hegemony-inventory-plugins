@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+schema_version: 1
+kind: object
+object_type: example.service
+external_id: portal
+name: Customer portal
+attributes:
+  scope: east
+  port: 443
+  enabled: true
+  owner: Operations
+  labels:
+  - public
+  settings:
+    tier: production
+relationships:
+- rel: scope
+  target_object_type: example.scope
+  target_external_id: east

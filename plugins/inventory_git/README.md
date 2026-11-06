@@ -177,3 +177,8 @@ _VLAN = ObjectFieldMapping(
 Register the type with `register_object_type(ObjectTypeSpec(...))` and add its id to
 `supported_resources`. After installing the new wheel version and restarting, it appears in
 the inventory submenu with schema-driven list/detail pages — no core change, no migration.
+
+## Generic object types
+
+See [Generic Git inventory objects](GENERIC_OBJECTS.md) for declarative type definitions,
+attributes, relationships, discovery, synchronization, and cascading flow inputs.

@@ -1,3 +1,9 @@
+## [0.5.0](https://github.com/hegemony-sh/hegemony-inventory-plugins/compare/v0.4.3...v0.5.0) (2026-11-06)
+
+### Features
+
+* **git:** ingest declarative generic inventory objects ([e1d5fad](https://github.com/hegemony-sh/hegemony-inventory-plugins/commit/e1d5fad92fa29f6ccc4ecdb9ced8d47879613f8d))
+
 ## [0.4.3](https://github.com/hegemony-sh/hegemony-inventory-plugins/compare/v0.4.2...v0.4.3) (2026-11-06)
 
 ### Bug Fixes

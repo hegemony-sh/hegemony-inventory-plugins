@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+schema_version: 1
+kind: object
+object_type: example.prefix
+external_id: users
+name: Users subnet
+attributes:
+  scope: east
+  cidr: 192.0.2.0/24
+relationships: []

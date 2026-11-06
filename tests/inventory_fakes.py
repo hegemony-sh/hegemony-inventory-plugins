@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlparse
 
@@ -24,6 +25,10 @@ class FakeGitFetcher:
         self, *, git_repo_id: str, branch: str | None, operation: str
     ) -> GitWorkdir:
         return self._workdir
+
+    @asynccontextmanager
+    async def locked_workdir(self, **kwargs):
+        yield await self.get_workdir(**kwargs)
 
 
 class FakePlatformServices:
