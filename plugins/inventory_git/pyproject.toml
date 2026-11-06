@@ -5,12 +5,12 @@
 
 [project]
 name = "hegemony-inventory-git"
-version = "0.4.3"
+version = "0.5.0"
 description = "Git YAML inventory provider plugin for Hegemony"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
-dependencies = ["hegemony-inventory-sdk==0.4.3", "pyyaml>=6.0.0", "jsonschema>=4.23.0,<5"]
+dependencies = ["hegemony-inventory-sdk==0.5.0", "pyyaml>=6.0.0", "jsonschema>=4.23.0,<5"]
 
 [project.entry-points."hegemony.inventory_plugins"]
 git = "hegemony_inventory_git:register"
