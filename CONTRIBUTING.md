@@ -56,8 +56,8 @@ are the commands of the `Lint, Test, Build Wheels` CI job, in this order:
 
 ```bash
 uv sync --frozen --all-packages
-uv run ruff check packages plugins tests scripts
-uv run ruff format --check packages plugins tests scripts
+uv run ruff check packages plugins tests scripts fuzz
+uv run ruff format --check packages plugins tests scripts fuzz
 uv run reuse lint
 uv run ty check
 uv run python scripts/generate_catalogue.py --check
@@ -84,6 +84,7 @@ holder and Jakub Trávník as the author, in the file's own comment syntax:
 ```
 
 <!-- REUSE-IgnoreEnd -->
+
 
 ## Commit messages and pull requests
 
@@ -140,3 +141,43 @@ dist/SHA256SUMS` after rebuilding the wheels at that tag).
 The shared workflow is pinned by commit in `.github/workflows/release.yml`;
 a change merged to it reaches this repository through a pull request that
 bumps that SHA.
+
+## Fuzzing
+
+Atheris targets in `fuzz/` exercise NetBox filter conjunction and SDK object identifiers, nested paths and record mappings.
+Each target combines malformed raw inputs with generated valid cases and
+checks semantic properties. Targets use only synthetic data and perform no
+network requests, secret lookups or notification delivery.
+
+```bash
+uv sync --frozen --all-packages --group fuzz
+uv run --frozen --group fuzz python fuzz/run_campaign.py --seconds 60
+```
+
+`--seconds 0` replays all corpus inputs, reports each failing filename and
+fails after completing replay. CI replays the deterministic seed corpus on
+every change; ClusterFuzzLite also spends a 300-second fuzzing budget per PR.
+`fuzz/seed_corpus.py` generates readable UTF-8 seeds, including boundary cases.
+When fixing a discovered bug, add both a seed and a unit regression.
+
+The default-branch nightly workflow spends ten minutes per target, minimizes
+the accumulated corpus and caches successful results. PR builds restore it
+read-only and add it to their seed archives. No extra credentials or storage
+repository are needed. Cache eviction is safe: seed recipes remain in git.
+The schedule becomes active after merge.
+
+Nightly `fuzz-results` artifacts contain crash reproducers and Python branch
+coverage reports. Local reports are in `build/fuzz-coverage/html/index.html`.
+They cover the target modules, including functions outside the fuzzed entry
+points; use missing branches to guide target improvements, not as a whole
+project coverage claim. Replay a crash with
+`uv run --group fuzz python fuzz/<target>_fuzzer.py <crash-file>`.
+Bump the workflow corpus cache prefix if changing the input encoding.
+
+To verify the packaged targets used by ClusterFuzzLite:
+
+```bash
+docker build -t cflite -f .clusterfuzzlite/Dockerfile .
+docker run --rm -e SANITIZER=address -e FUZZING_LANGUAGE=python \
+  -v "$PWD/build/fuzz:/out" cflite compile
+```

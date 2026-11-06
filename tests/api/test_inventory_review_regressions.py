@@ -203,6 +203,10 @@ def test_independent_scope_constraints_intersect(baseline, caller, expected):
         ("name__isw=core&name__isw=edge", "name__isw=core&name__isw=dist", "cannot require"),
         ("id__gte=5", "id__gte=five", "cannot be compared"),
         ("id__gte=5", "id__gte=2026-01-01", "cannot be compared"),
+        # Decimal reads these, but they are no NetBox number (and NaN does not compare).
+        ("id__gt=1", "id__gt=NaN", "cannot be compared"),
+        ("id__gt=sNaN", "id__gt=1", "cannot be compared"),
+        ("id__lt=Infinity", "id__lt=5", "cannot be compared"),
     ],
 )
 def test_a_conjunction_netbox_cannot_express_is_refused_rather_than_widened(
