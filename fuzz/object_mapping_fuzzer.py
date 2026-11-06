@@ -4,48 +4,80 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Fuzz the inventory SDK's object-type ids and record paths.
+"""Seeds contain an object id, a dotted path, then JSON, separated by newlines."""
 
-An object-type id from a plugin or a URL is valid or refused with ValueError,
-and a dotted path into a source record (JSON from the inventory system) reads
-a value or None, never an exception.
-"""
-
+import copy
 import json
+import string
 import sys
 
 import atheris
 
-with atheris.instrument_imports():
-    from hegemony_inventory_sdk.identifiers import (
-        OBJECT_TYPE_ID_MAX_LENGTH,
-        validate_object_type_id,
+with atheris.instrument_imports(include=["hegemony_inventory_sdk"]):
+    from hegemony_inventory_sdk.identifiers import validate_object_type_id
+    from hegemony_inventory_sdk.mapping import (
+        ObjectFieldMapping,
+        RelationshipMapping,
+        extract_path,
+        map_record,
     )
-    from hegemony_inventory_sdk.mapping import extract_path
 
 
+@atheris.instrument_func
 def test_one_input(data: bytes) -> None:
-    fdp = atheris.FuzzedDataProvider(data)
-    object_type = fdp.ConsumeUnicodeNoSurrogates(fdp.ConsumeIntInRange(0, 128))
+    raw = data[:16384].decode("utf-8", errors="replace")
+    identifier, _, rest = raw.partition("\n")
+    allowed_start = string.ascii_lowercase + string.digits
+    valid = (
+        1 <= len(identifier) <= 100
+        and identifier[0] in allowed_start
+        and all(c in allowed_start + "_.-" for c in identifier)
+    )
     try:
-        assert validate_object_type_id(object_type) == object_type
-        assert 1 <= len(object_type) <= OBJECT_TYPE_ID_MAX_LENGTH
+        result = validate_object_type_id(identifier)
     except ValueError:
-        pass
-    path = fdp.ConsumeUnicodeNoSurrogates(fdp.ConsumeIntInRange(0, 128))
+        assert not valid
+    else:
+        assert valid and result == identifier
+
+    fdp = atheris.FuzzedDataProvider(data)
+    identity = str(fdp.ConsumeIntInRange(0, 99999))
+    name = fdp.ConsumeUnicodeNoSurrogates(64)
+    parent = "parent-" + identity
+    leaf = {"id": identity, "name": name, "value": [identity, None], "parent": parent}
+    record = leaf
+    segments = []
+    for n in range(fdp.ConsumeIntInRange(1, 8)):
+        key = "level" + str(n)
+        record = {key: record, "unrelated": False}
+        segments.insert(0, key)
+    prefix = ".".join(segments) + "."
+    before = copy.deepcopy(record)
+    assert extract_path(record, prefix + "id") == identity
+    assert extract_path(record, prefix + "missing") is None
+    mapping = ObjectFieldMapping(
+        object_type="device",
+        identity=prefix + "id",
+        name_field=prefix + "name",
+        field_map={"value": prefix + "value"},
+        relationships=(RelationshipMapping("parent", "site", prefix + "parent"),),
+    )
+    mapped = map_record(record, mapping, provider_id="synthetic-provider")
+    assert mapped.external_id == identity
+    assert mapped.name == (name.strip() or identity)
+    assert mapped.attributes == {"value": leaf["value"]}
+    assert mapped.relationships[0].target_external_id == parent
+    assert mapped.object_type == "device" and mapped.provider_id == "synthetic-provider"
+    assert record == before
+    path, _, document = rest.partition("\n")
     try:
-        record = json.loads(fdp.ConsumeUnicodeNoSurrogates(4096))
+        record = json.loads(document)
     except (ValueError, RecursionError):
-        # Not a document, or nested deeper than json.loads itself handles.
         return
     if isinstance(record, dict):
         extract_path(record, path)
 
 
-def main() -> None:
+if __name__ == "__main__":
     atheris.Setup(sys.argv, test_one_input)
     atheris.Fuzz()
-
-
-if __name__ == "__main__":
-    main()
