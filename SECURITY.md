@@ -13,7 +13,7 @@ Security reports are handled privately. Please do not open a public GitHub issue
 
 This repository holds the Hegemony inventory SDK (`hegemony-inventory-sdk`) and the NetBox and Git inventory provider wheels (`hegemony-inventory-netbox`, `hegemony-inventory-git`). Report here a vulnerability in one of these packages: for example how a provider handles credentials or tokens, builds requests to the system it reads, or parses the data it receives.
 
-A vulnerability in the Hegemony platform itself belongs to the platform's [security policy](https://github.com/hegemony-sh/hegemony/blob/develop/SECURITY.md). Both are reported to the same address.
+A vulnerability in the Hegemony platform itself belongs to the platform's [security policy](https://github.com/hegemony-sh/hegemony/blob/develop/SECURITY.md). Follow that policy's reporting instructions for platform vulnerabilities.
 
 ## Supported versions
 
@@ -25,7 +25,15 @@ If you install the wheels into your own Hegemony deployment, update to the newes
 
 ## Reporting a vulnerability
 
-Report vulnerabilities privately by emailing [security@hegemony.sh](mailto:security@hegemony.sh).
+Use [GitHub private vulnerability reporting](https://github.com/hegemony-sh/hegemony-inventory-plugins/security/advisories/new)
+to report a vulnerability in this repository. The HTTPS form keeps the report
+private to the reporter and authorized advisory collaborators until publication.
+You can also open **Security → Advisories → Report a vulnerability** in this
+repository. A GitHub account is required.
+
+If you cannot use GitHub, email [security@hegemony.sh](mailto:security@hegemony.sh)
+for initial contact and to arrange a confidential way to share sensitive details.
+Do not send sensitive exploit details in unencrypted email or public issues.
 
 Please include as much detail as you can safely share:
 
