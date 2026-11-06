@@ -15,6 +15,7 @@ import yaml
 import yaml.resolver
 from pydantic import ValidationError
 
+from .generic import GenericInventory, load_generic
 from .inventory_schema import GitInventoryDeviceV1, GitInventorySiteV1
 
 
@@ -57,6 +58,7 @@ class LoadedGitInventory:
     sites: dict[str, LoadedGitSite]
     device_files: dict[str, str]
     errors: list[GitInventoryLoadError] = field(default_factory=list)
+    generic: GenericInventory = field(default_factory=GenericInventory)
 
 
 def load_git_inventory(
@@ -176,9 +178,19 @@ def load_git_inventory(
         except (ValueError, yaml.YAMLError) as exc:
             errors.append(GitInventoryLoadError(rel, str(exc)))
 
+    try:
+        generic = load_generic(
+            base,
+            root=root_resolved,
+            remaining_files=max_files - len(device_inventory_files) - len(site_inventory_files),
+            max_file_bytes=max_file_bytes,
+        )
+    except (ValueError, OSError, yaml.YAMLError, RecursionError) as exc:
+        errors.append(GitInventoryLoadError(inventory_path, str(exc)))
+        generic = GenericInventory()
     if errors:
         return LoadedGitInventory([], sites, {}, errors)
-    return LoadedGitInventory(devices, sites, device_files, [])
+    return LoadedGitInventory(devices, sites, device_files, [], generic)
 
 
 def _validate_site_hierarchy(sites: dict[str, LoadedGitSite]) -> list[GitInventoryLoadError]:
@@ -279,4 +291,9 @@ def _load_yaml(path: Path) -> Any:
         # DuplicateKeyLoader subclasses yaml.SafeLoader (no arbitrary object
         # instantiation); a custom loader is required because yaml.safe_load()
         # cannot take a Loader= and we need duplicate-key rejection.
-        return yaml.load(fh, Loader=DuplicateKeyLoader)  # nosec B506 - SafeLoader subclass
+        try:
+            return yaml.load(fh, Loader=DuplicateKeyLoader)  # nosec B506 - SafeLoader subclass
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            # SafeLoader scalar constructors can fail outside YAMLError and
+            # include raw record values in their exception messages.
+            raise yaml.YAMLError("Invalid YAML scalar") from None

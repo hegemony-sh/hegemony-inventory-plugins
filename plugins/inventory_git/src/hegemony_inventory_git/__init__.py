@@ -36,7 +36,7 @@ def register(registry: InventoryPluginRegistry) -> None:
         provider_type="git",
         display_name="Git inventory",
         description="Read/query YAML inventory from a configured Git repository",
-        capabilities=[Capability.READ.value, Capability.QUERY.value],
+        capabilities=[Capability.READ.value, Capability.QUERY.value, Capability.DISCOVER.value],
         supported_resources=[ResourceType.DEVICE.value, ResourceType.SITE.value],
         factory=build_git_provider,
         config_model=GitInventoryProviderConfig,
