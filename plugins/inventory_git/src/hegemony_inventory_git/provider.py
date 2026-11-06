@@ -8,18 +8,24 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Mapping
+import copy
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import asdict
 from pathlib import Path
 from time import monotonic
 from typing import Any
 
+from jsonschema import Draft202012Validator
+
 from hegemony_inventory_sdk import (
     Capability,
     DeviceDescriptor,
+    DiscoveryResult,
     GitWorkdir,
     InventoryProvider,
     InventoryProviderError,
+    ObjectDescriptor,
+    ObjectRelationship,
     PlatformServices,
     ProviderCallContext,
     ProviderErrorCode,
@@ -29,15 +35,16 @@ from hegemony_inventory_sdk import (
     ResourceType,
     SiteRef,
 )
+from hegemony_inventory_sdk.mapping import extract_path
 
 from .config import GitInventoryProviderConfig
-from .loader import LoadedGitSite, load_git_inventory
+from .loader import LoadedGitInventory, LoadedGitSite, load_git_inventory
 from .query import device_tags, matches_query
 
 
 class GitInventoryProvider(InventoryProvider):
     provider_type = "git"
-    capabilities = frozenset({Capability.READ, Capability.QUERY})
+    capabilities = frozenset({Capability.READ, Capability.QUERY, Capability.DISCOVER})
     supported_resources = frozenset({ResourceType.DEVICE, ResourceType.SITE})
     config_schema = GitInventoryProviderConfig.model_json_schema()
 
@@ -47,6 +54,7 @@ class GitInventoryProvider(InventoryProvider):
         self.id = provider_id
         self.config = GitInventoryProviderConfig.model_validate(config or {})
         self._services = services
+        self._sync_snapshot: tuple[GitWorkdir, LoadedGitInventory] | None = None
 
     async def list(
         self,
@@ -84,14 +92,7 @@ class GitInventoryProvider(InventoryProvider):
     async def get(
         self, resource_type: ResourceType, external_id: str, *, context: ProviderCallContext
     ) -> DeviceDescriptor | SiteRef | ResourceRef:
-        entry = await self._cache_entry(context)
-        loaded = load_git_inventory(
-            Path(entry.path),
-            self.config.path,
-            max_files=self._services.limits.max_git_files,
-            max_file_bytes=self._services.limits.max_git_file_bytes,
-        )
-        self._raise_load_errors(loaded, context.operation)
+        entry, loaded = await self._snapshot(context)
 
         if resource_type == ResourceType.DEVICE:
             for device in loaded.devices:
@@ -119,14 +120,7 @@ class GitInventoryProvider(InventoryProvider):
     async def query_devices(
         self, expr: str, *, limit: int | None = None, context: ProviderCallContext
     ) -> builtins.list[DeviceDescriptor]:
-        entry = await self._cache_entry(context)
-        loaded = load_git_inventory(
-            Path(entry.path),
-            self.config.path,
-            max_files=self._services.limits.max_git_files,
-            max_file_bytes=self._services.limits.max_git_file_bytes,
-        )
-        self._raise_load_errors(loaded, context.operation)
+        entry, loaded = await self._snapshot(context)
         result_limit = limit
         descriptors: list[DeviceDescriptor] = []
         for device in loaded.devices:
@@ -146,26 +140,13 @@ class GitInventoryProvider(InventoryProvider):
     async def list_sites(
         self, *, limit: int | None = None, context: ProviderCallContext
     ) -> builtins.list[SiteRef]:
-        entry = await self._cache_entry(context)
-        loaded = load_git_inventory(
-            Path(entry.path),
-            self.config.path,
-            max_files=self._services.limits.max_git_files,
-            max_file_bytes=self._services.limits.max_git_file_bytes,
-        )
-        self._raise_load_errors(loaded, context.operation)
+        entry, loaded = await self._snapshot(context)
         return self._site_refs_from_loaded(loaded, limit=limit)
 
     async def test_connection(self, *, context: ProviderCallContext) -> ProviderTestResult:
         start = monotonic()
         try:
-            entry = await self._cache_entry(context)
-            loaded = load_git_inventory(
-                Path(entry.path),
-                self.config.path,
-                max_files=self._services.limits.max_git_files,
-                max_file_bytes=self._services.limits.max_git_file_bytes,
-            )
+            entry, loaded = await self._snapshot(context)
             if loaded.errors:
                 raise self._error(
                     ProviderErrorCode.SCHEMA_VALIDATION_FAILED,
@@ -176,7 +157,12 @@ class GitInventoryProvider(InventoryProvider):
             ok = True
             error = None
             message = "Git inventory connection succeeded"
-            details = {"head_sha": entry.head_sha, "device_count": len(loaded.devices)}
+            details = {
+                "head_sha": entry.head_sha,
+                "device_count": len(loaded.devices),
+                "object_type_count": len(loaded.generic.specs),
+                "object_count": sum(len(records) for records in loaded.generic.records.values()),
+            }
         except InventoryProviderError as exc:
             ok = False
             error = exc.envelope.to_dict()
@@ -191,6 +177,200 @@ class GitInventoryProvider(InventoryProvider):
             error=error,
             safe_details=details,
         )
+
+    async def _snapshot(
+        self, context: ProviderCallContext
+    ) -> tuple[GitWorkdir, LoadedGitInventory]:
+        if context.operation.startswith("auto_sync") and self._sync_snapshot is not None:
+            return self._sync_snapshot
+
+        def read(entry: GitWorkdir) -> tuple[GitWorkdir, LoadedGitInventory]:
+            loaded = load_git_inventory(
+                Path(entry.path),
+                self.config.path,
+                max_files=self._services.limits.max_git_files,
+                max_file_bytes=self._services.limits.max_git_file_bytes,
+            )
+            self._raise_load_errors(loaded, context.operation)
+            return entry, loaded
+
+        # New hosts lend a locked checkout while it is parsed into owned memory.
+        # Legacy hosts remain usable for site/device inventories only.
+        locked = getattr(self._services.git, "locked_workdir", None)
+        if callable(locked):
+            async with locked(
+                git_repo_id=str(self.config.git_repo_id),
+                branch=self.config.branch,
+                operation=context.operation,
+            ) as entry:
+                result = read(entry)
+        else:
+            result = read(await self._cache_entry(context))
+            if result[1].generic.definitions:
+                raise self._error(
+                    ProviderErrorCode.MALFORMED_QUERY,
+                    "Generic Git objects require platform Git read-lock support",
+                    context.operation,
+                )
+        return result
+
+    async def discover(self, *, context: ProviderCallContext) -> DiscoveryResult:
+        self._sync_snapshot = None
+        snapshot = await self._snapshot(context)
+        if context.operation == "discover_cached":
+            # Core constructs a fresh provider per sync. A subsequent discovery
+            # resets this snapshot; unrelated reads never reuse it.
+            self._sync_snapshot = snapshot
+        generic = snapshot[1].generic
+        return DiscoveryResult(
+            source_version=generic.fingerprint,
+            object_types=tuple(generic.specs[key] for key in sorted(generic.specs)),
+            mappings={key: definition.mapping() for key, definition in generic.definitions.items()},
+        )
+
+    async def _objects(
+        self, object_type: str, query: Mapping[str, Any] | None, context: ProviderCallContext
+    ) -> builtins.list[ObjectDescriptor]:
+        entry, loaded = await self._snapshot(context)
+        generic = loaded.generic
+        spec = generic.specs.get(object_type)
+        if spec is None:
+            raise self._error(
+                ProviderErrorCode.MALFORMED_QUERY,
+                "Git object type is not supported",
+                context.operation,
+            )
+        query = dict(query or {})
+        if not Draft202012Validator(dict(spec.query_schema)).is_valid(query):
+            raise self._error(
+                ProviderErrorCode.MALFORMED_QUERY,
+                "Unsupported or invalid object filter",
+                context.operation,
+            )
+        results = []
+        for record in generic.records[object_type].values():
+            if any(
+                getattr(record, key) != query[key]
+                for key in ("name", "external_id")
+                if key in query
+            ):
+                continue
+            if any(
+                not self._equal_attribute(record.attributes, key[5:], value)
+                for key, value in query.items()
+                if key.startswith("attr.")
+            ):
+                continue
+            search = query.get("q", "").casefold()
+            searchable = [
+                record.name,
+                record.display_name,
+                record.external_id,
+                *(extract_path(record.attributes, key) for key in spec.ui.search_fields),
+            ]
+            if search and not any(
+                search in str(value).casefold() for value in searchable if value is not None
+            ):
+                continue
+            results.append(
+                ObjectDescriptor(
+                    provider_id=self.id,
+                    object_type=object_type,
+                    external_id=record.external_id,
+                    name=record.name,
+                    display_name=record.display_name,
+                    attributes=copy.deepcopy(record.attributes),
+                    relationships=tuple(
+                        ObjectRelationship(
+                            rel=edge.rel,
+                            target_object_type=edge.target_object_type,
+                            target_external_id=edge.target_external_id,
+                        )
+                        for edge in record.relationships
+                    ),
+                    source_version={"commit": entry.head_sha},
+                    descriptive={"file_path": generic.files[(object_type, record.external_id)]},
+                )
+            )
+        results.sort(key=lambda obj: obj.external_id or "")
+        sort = spec.ui.default_sort
+        if sort:
+            key = sort.lstrip("-")
+
+            def sort_key(obj: ObjectDescriptor) -> tuple[bool, str, Any]:
+                value = (
+                    getattr(obj, key)
+                    if key in {"name", "display_name", "external_id"}
+                    else extract_path(obj.attributes, key)
+                )
+                return (
+                    value is None,
+                    "number" if type(value) in (int, float) else type(value).__name__,
+                    value if isinstance(value, (str, int, float)) else str(value),
+                )
+
+            results.sort(key=sort_key, reverse=sort.startswith("-"))
+        return results
+
+    @staticmethod
+    def _equal_attribute(attributes: dict[str, Any], path: str, value: Any) -> bool:
+        current: Any = attributes
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False
+            current = current[part]
+        # Python considers True == 1; JSON typed equality must not.
+        return current == value and (isinstance(current, bool) == isinstance(value, bool))
+
+    async def list_objects(
+        self,
+        object_type: str,
+        query: Mapping[str, Any] | None = None,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+        context: ProviderCallContext,
+    ) -> builtins.list[ObjectDescriptor]:
+        if cursor is not None or (limit is not None and (type(limit) is not int or limit < 0)):
+            raise self._error(
+                ProviderErrorCode.MALFORMED_QUERY,
+                "Cursors are unsupported; use iter_object_pages for complete enumeration",
+                context.operation,
+            )
+        if object_type in {"device", "site"}:
+            return await super().list_objects(object_type, query, limit=limit, context=context)
+        objects = await self._objects(object_type, query, context)
+        return objects if limit is None else objects[:limit]
+
+    async def get_object(
+        self, object_type: str, external_id: str, *, context: ProviderCallContext
+    ) -> ObjectDescriptor:
+        if object_type in {"device", "site"}:
+            return await super().get_object(object_type, external_id, context=context)
+        objects = await self._objects(object_type, {"external_id": external_id}, context)
+        if not objects:
+            raise self._error(
+                ProviderErrorCode.NOT_FOUND, "Git object not found", context.operation
+            )
+        return objects[0]
+
+    async def iter_object_pages(
+        self,
+        object_type: str,
+        query: Mapping[str, Any] | None = None,
+        *,
+        context: ProviderCallContext,
+    ) -> AsyncIterator[builtins.list[ObjectDescriptor]]:
+        objects = await self.list_objects(object_type, query, context=context)
+        page_size = 500
+        if len(objects) > page_size * self._services.limits.max_provider_pages:
+            raise self._error(
+                ProviderErrorCode.SCHEMA_VALIDATION_FAILED,
+                "Object page count limit exceeded",
+                context.operation,
+            )
+        for offset in range(0, len(objects), page_size):
+            yield objects[offset : offset + page_size]
 
     def _raise_load_errors(self, loaded: Any, operation: str) -> None:
         if loaded.errors:
@@ -257,7 +437,7 @@ class GitInventoryProvider(InventoryProvider):
         return merged
 
     def _site_ref_from_model(self, site_model: LoadedGitSite) -> SiteRef:
-        descriptive = dict(getattr(site_model.model, "custom_fields", {}) or {})
+        descriptive = copy.deepcopy(getattr(site_model.model, "custom_fields", {}) or {})
         description = getattr(site_model.model, "description", None)
         if description:
             descriptive["description"] = description
@@ -287,7 +467,7 @@ class GitInventoryProvider(InventoryProvider):
             "file_path": file_path,
         }
         descriptive = {
-            "custom_fields": device.custom_fields,
+            "custom_fields": copy.deepcopy(device.custom_fields),
             "source_version": source_version,
             "native_tags": tags,
         }
@@ -300,7 +480,7 @@ class GitInventoryProvider(InventoryProvider):
             mgmt_host=device.mgmt_host,
             mgmt_port=device.mgmt_port,
             platform=device.platform,
-            attributes=device.attributes,
+            attributes=copy.deepcopy(device.attributes),
             site=site,
             role=device.role,
             tags={"role": device.role} if device.role else {},

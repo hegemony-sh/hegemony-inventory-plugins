@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+nodes:
+- id: section
+  kind: section
+  position_x: 0
+  position_y: 0
+  data:
+    label: Service selection
+- id: scope
+  kind: field
+  parent_id: section
+  position_x: 0
+  position_y: 40
+  data:
+    label: Scope
+    field_id: scope
+    field_type: core.enum
+    config:
+      option_source:
+        kind: inventory.objects
+        config:
+          object_type: example.scope
+          value_field: external_id
+- id: port
+  kind: field
+  parent_id: section
+  position_x: 0
+  position_y: 100
+  data:
+    label: Port
+    field_id: port
+    field_type: core.enum
+    config:
+      option_source:
+        kind: inventory.objects
+        config:
+          object_type: example.service
+          value_field: attr.port
+edges:
+- id: scope-services
+  source: scope
+  target: port
+  relations:
+  - semantic_type: options_filter
+    value: attr.scope

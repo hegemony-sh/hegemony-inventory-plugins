@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+schema_version: 1
+kind: object_type
+id: example.scope
+display_name: Scope
+field_schema:
+  type: object
+  properties:
+    region:
+      type: string
+  additionalProperties: false
+filters:
+- region
+relationships: []
+ui:
+  columns:
+  - name
+  - region
+  search_fields:
+  - region
