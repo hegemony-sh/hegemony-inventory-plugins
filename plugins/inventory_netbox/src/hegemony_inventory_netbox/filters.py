@@ -65,9 +65,14 @@ def _unique(values: Sequence[str]) -> list[str]:
 def _bound_key(parameter: str, value: str) -> Decimal | datetime:
     """A comparable form of a bound: NetBox bounds are numbers or ISO 8601 stamps."""
     try:
-        return Decimal(value)
+        number = Decimal(value)
     except InvalidOperation:
         pass
+    else:
+        # Decimal also reads NaN and Infinity, which are no NetBox number, and a NaN
+        # cannot even be compared (InvalidOperation, not ValueError).
+        if number.is_finite():
+            return number
     try:
         return datetime.fromisoformat(value)
     except ValueError:
