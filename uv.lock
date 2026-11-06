@@ -216,7 +216,7 @@ wheels = [
 
 [[package]]
 name = "hegemony-inventory-git"
-version = "0.4.2"
+version = "0.4.3"
 source = { editable = "plugins/inventory_git" }
 dependencies = [
     { name = "hegemony-inventory-sdk" },
@@ -231,7 +231,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-inventory-netbox"
-version = "0.4.2"
+version = "0.4.3"
 source = { editable = "plugins/inventory_netbox" }
 dependencies = [
     { name = "hegemony-inventory-sdk" },
@@ -285,7 +285,7 @@ fuzz = [
 
 [[package]]
 name = "hegemony-inventory-sdk"
-version = "0.4.2"
+version = "0.4.3"
 source = { editable = "packages/inventory_sdk" }
 dependencies = [
     { name = "pydantic" },

@@ -1,3 +1,9 @@
+## [0.4.3](https://github.com/hegemony-sh/hegemony-inventory-plugins/compare/v0.4.2...v0.4.3) (2026-11-06)
+
+### Bug Fixes
+
+* **netbox:** refuse NaN and Infinity as filter bounds ([988beda](https://github.com/hegemony-sh/hegemony-inventory-plugins/commit/988bedad37f544da5e7b43bdb6d624de77923a26))
+
 ## [0.4.2](https://github.com/hegemony-sh/hegemony-inventory-plugins/compare/v0.4.1...v0.4.2) (2026-10-25)
 
 ### Bug Fixes
