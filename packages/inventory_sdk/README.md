@@ -143,7 +143,9 @@ Query syntax and supported filters are provider-specific; see the
 | `update` | `resource_type`, `external_id`, patch mapping | `None`; unsupported by the base implementation |
 
 Implement the five abstract device/site methods. The generic list/get defaults
-adapt device/site results and reject other object types. The default page
+adapt device/site results and reject other object types. For sites, the default
+`list_objects` adapter calls `list_sites` and ignores `query`; providers that
+support filtered site reads must override `list_objects`. The default page
 iterator yields one page from `list_objects`. Discovery and updates are optional;
 the base implementations raise an `InventoryProviderError`.
 
@@ -171,17 +173,27 @@ a list of `ChangeEvent` values. The base webhook implementation is unsupported.
 
 For delta-capable providers, return an ordering marker in
 `source_version["marker"]` and include records at or after `context.since`.
-Markers must sort lexicographically in source order. A missing marker means a
-full read; the host uses full reconciliation to detect deletions.
+Markers must sort lexicographically in source order. `context.since is None`
+requests a full read. An individual descriptor without a marker does not force
+a full read or clear the saved marker; the host retains the highest available
+marker. Records without markers may remain stale until scheduled full
+reconciliation, which also detects deletions.
 
 ### Host services and errors
 
-The host injects `PlatformServices` at construction. It supplies scale limits,
-`resolve_secret_ref(ref, *, operation)` (a secret string or `None`),
-`validate_url(url, *, operation)` (the validated host), and
-`validate_access_config(...)` (a validated dictionary). Its `git.get_workdir(...)`
-returns a `GitWorkdir` containing a checkout path and pinned commit.
-Secret storage, URL policy and Git authentication belong to the host.
+The host injects `PlatformServices` at construction. It supplies scale limits
+and the following methods:
+
+| Method | Calling convention | Result |
+| --- | --- | --- |
+| `resolve_secret_ref(ref, *, operation)` | Async; must be awaited | A secret string or `None` |
+| `validate_url(url, *, operation)` | Async; must be awaited before making the request | The validated host |
+| `validate_access_config(...)` | Synchronous | A validated dictionary |
+| `git.get_workdir(...)` | Async; must be awaited | A `GitWorkdir` containing a checkout path and pinned commit |
+
+For example, use `await services.validate_url(url, operation=context.operation)`
+before accessing a provider URL. Calling it without `await` does not perform
+validation. Secret storage, URL policy and Git authentication belong to the host.
 
 Provider failures use `InventoryProviderError.envelope`, a
 `ProviderErrorEnvelope` with provider identity, operation, error code, safe
