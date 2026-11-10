@@ -43,6 +43,11 @@ _SECRET_REF_KEYS: Mapping[str, str] = {
     "access_config.enable.password_ref": "enable.password_ref",
 }
 
+#: ``field_map`` keys whose value is the path of a boolean attribute, likewise.
+_ACCESS_FLAG_KEYS: Mapping[str, str] = {
+    "access_config.ssh.allow_legacy_ssh": "ssh.allow_legacy_ssh",
+}
+
 
 def _device_binding(config: NetBoxProviderConfig) -> ProjectionBinding:
     """The device binding with this provider's choices applied."""
@@ -63,6 +68,14 @@ def _device_binding(config: NetBoxProviderConfig) -> ProjectionBinding:
         # Statuses left out of the map stay active, which is what an empty map means.
         maintenance_state_map={"*": "active", **dict(config.status_map or {})},
         secret_refs=secret_refs,
+        access_flags={
+            **default.access_flags,
+            **{
+                target: path
+                for key, target in _ACCESS_FLAG_KEYS.items()
+                if (path := field_map.get(key))
+            },
+        },
         default_access_config=dict(config.default_access_config or {}),
         tag_list="tags",
         native_tags="tags",

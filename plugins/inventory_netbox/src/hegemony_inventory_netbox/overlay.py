@@ -307,6 +307,9 @@ BINDINGS: Mapping[str, ProjectionBinding] = MappingProxyType(
                 "ssh.private_key_ref": "custom_fields.hegemony_ssh_private_key_ref",
                 "enable.password_ref": "custom_fields.hegemony_enable_password_ref",
             },
+            access_flags={
+                "ssh.allow_legacy_ssh": "custom_fields.hegemony_ssh_allow_legacy_ssh",
+            },
             tags={"role": "role"},
             native_tags="tags",
             descriptive={

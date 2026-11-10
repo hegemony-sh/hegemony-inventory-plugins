@@ -112,6 +112,14 @@ class ProjectionBinding:
     maintenance_state_map: Mapping[str, str] = field(default_factory=dict)
     #: Attribute paths for access-config secret references, by dotted config key.
     secret_refs: Mapping[str, str] = field(default_factory=dict)
+    #: Attribute paths for access-config booleans, by dotted config key.
+    #:
+    #: Kept apart from :attr:`secret_refs` because those are read as text. A flag
+    #: such as ``ssh.allow_legacy_ssh`` relaxes a security policy, so the platform
+    #: takes it only as the boolean the source stores: a record without the
+    #: attribute leaves the flag unset, and anything that is not a boolean is
+    #: refused rather than guessed at.
+    access_flags: Mapping[str, str] = field(default_factory=dict)
     #: Access config every projected device starts from, before :attr:`secret_refs`.
     #:
     #: Literal values rather than paths: a transport port or a username the whole estate
@@ -192,6 +200,7 @@ class ProjectionBinding:
             or self.platform
             or self.serial
             or self.secret_refs
+            or self.access_flags
             or self.default_access_config
             or self.maintenance_state
             or self.maintenance_state_map

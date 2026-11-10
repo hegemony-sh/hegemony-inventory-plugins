@@ -150,6 +150,7 @@ _BINDING_FIELDS: tuple[str, ...] = (
     "maintenance_state",
     "maintenance_state_map",
     "secret_refs",
+    "access_flags",
     "default_access_config",
     "tags",
     "descriptive",
