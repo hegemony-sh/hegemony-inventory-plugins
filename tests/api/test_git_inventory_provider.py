@@ -7,17 +7,22 @@
 
 import textwrap
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
 from hegemony_inventory_git.config import GitInventoryProviderConfig
-from hegemony_inventory_git.inventory_schema import GitInventoryDeviceV1
+from hegemony_inventory_git.inventory_schema import (
+    GitInventoryAccessConfigV1,
+    GitInventoryDeviceV1,
+)
 from hegemony_inventory_git.loader import load_git_inventory
 from hegemony_inventory_git.provider import GitInventoryProvider
 from hegemony_inventory_git.query import matches_query
 from hegemony_inventory_sdk import (
+    AccessConfigModel,
     Capability,
     DeviceDescriptor,
     InventoryProviderError,
@@ -710,3 +715,97 @@ def test_device_facts_flow_through_attributes_only():
         assert not hasattr(descriptor, key)
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
             GitInventoryDeviceV1.model_validate({**payload, key: "old"})
+
+
+@pytest.mark.asyncio
+async def test_git_provider_carries_the_legacy_ssh_flag_per_hop(tmp_path: Path) -> None:
+    """A device file allows legacy SSH for itself; the bastion keeps its own flag."""
+    _write_yaml(
+        tmp_path / "inventory" / "sites" / "lab" / "lab.yaml",
+        """
+        schema_version: 1
+        kind: site
+        external_id: lab
+        name: Lab
+        """,
+    )
+    _write_yaml(
+        tmp_path / "inventory" / "devices" / "old.yaml",
+        """
+        schema_version: 1
+        kind: device
+        external_id: old
+        name: old
+        mgmt_host: 172.20.30.11
+        site: lab
+        access_config:
+          ssh:
+            allow_legacy_ssh: true
+        """,
+    )
+    _write_yaml(
+        tmp_path / "inventory" / "devices" / "new.yaml",
+        """
+        schema_version: 1
+        kind: device
+        external_id: new
+        name: new
+        mgmt_host: 172.20.30.12
+        site: lab
+        access_config:
+          jump_host:
+            allow_legacy_ssh: true
+        """,
+    )
+
+    provider = GitInventoryProvider(
+        provider_id="git:primary",
+        config={
+            "git_repo_id": str(uuid4()),
+            "path": "inventory",
+            "default_access_config": {
+                "ssh": {"username_ref": "{{ secret('vault://lab/ssh/username') }}"},
+                "jump_host": {
+                    "host": "dind",
+                    "username_ref": "{{ secret('vault://lab/bastion/username') }}",
+                    "password_ref": "{{ secret('vault://lab/bastion/password') }}",
+                },
+            },
+        },
+        services=FakePlatformServices(
+            provider_id="git:primary",
+            provider_type="git",
+            git=FakeGitFetcher(path=str(tmp_path)),
+        ),
+    )
+
+    devices = await provider.query_devices(
+        "site=lab",
+        context=ProviderCallContext(provider_id="git:primary", operation="query_devices"),
+    )
+
+    by_id = {device.external_id: device for device in devices}
+    assert by_id["old"].access_config["ssh"]["allow_legacy_ssh"] is True
+    assert "allow_legacy_ssh" not in by_id["old"].access_config["jump_host"]
+    assert "allow_legacy_ssh" not in by_id["new"].access_config["ssh"]
+    assert by_id["new"].access_config["jump_host"]["allow_legacy_ssh"] is True
+    for device in devices:
+        AccessConfigModel.model_validate(device.access_config)
+
+
+@pytest.mark.parametrize(
+    "ssh",
+    [{"allow_legacy_ssh": "true"}, {"username_ref": True}],
+)
+def test_git_device_keeps_booleans_and_text_apart_in_the_ssh_scope(ssh: dict[str, Any]) -> None:
+    """Only the legacy flag is a boolean, and it is never text."""
+    with pytest.raises(ValidationError):
+        GitInventoryAccessConfigV1.model_validate({"ssh": ssh})
+
+
+@pytest.mark.parametrize("scope", ["ssh", "jump_host"])
+def test_access_contract_takes_only_a_real_boolean_for_the_legacy_flag(scope: str) -> None:
+    """The shared contract accepts the flag on both hops and refuses text for it."""
+    AccessConfigModel.model_validate({scope: {"allow_legacy_ssh": True}})
+    with pytest.raises(ValidationError):
+        AccessConfigModel.model_validate({scope: {"allow_legacy_ssh": "true"}})

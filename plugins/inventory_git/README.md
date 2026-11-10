@@ -140,6 +140,22 @@ access_config:
     password_ref: "{{ secret('vault://devices/enable-password') }}"
 ```
 
+An old device that supports only weak SSH algorithms or small keys can say so
+itself, so no step has to:
+
+```yaml
+access_config:
+  ssh:
+    allow_legacy_ssh: true
+```
+
+The flag covers connections to that device only. A jump host has its own
+(`access_config.jump_host.allow_legacy_ssh`), so an old device does not weaken
+its jump host. It must be `true` or `false`, not text. Hegemony still checks
+the host key, offers every secure algorithm first, and warns in the run when
+the device did not need the flag. Use it only while the device is being
+upgraded.
+
 ## Walkthrough
 
 1. Add your inventory repository under **Settings → Git Repositories** (URL, branch,

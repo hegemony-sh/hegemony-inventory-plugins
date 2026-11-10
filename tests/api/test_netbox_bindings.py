@@ -138,3 +138,30 @@ def test_historical_defaults_are_accepted_but_only_credentials_remain() -> None:
 
     assert config.field_map
     assert all(key.startswith("access_config.") for key in config.field_map)
+
+
+def test_the_legacy_ssh_flag_is_a_boolean_path_apart_from_the_references() -> None:
+    """The flag is read as a boolean, so it is not one of the text references."""
+    binding = _device(_config())
+
+    assert binding.access_flags == {
+        "ssh.allow_legacy_ssh": "custom_fields.hegemony_ssh_allow_legacy_ssh"
+    }
+    assert "ssh.allow_legacy_ssh" not in binding.secret_refs
+
+
+def test_the_legacy_ssh_flag_can_be_remapped_without_losing_the_references() -> None:
+    config = _config(field_map={"access_config.ssh.allow_legacy_ssh": "custom_fields.old_ssh_only"})
+    binding = _device(config)
+
+    assert binding.access_flags == {"ssh.allow_legacy_ssh": "custom_fields.old_ssh_only"}
+    assert binding.secret_refs["ssh.password_ref"] == "custom_fields.hegemony_ssh_password_ref"
+
+
+def test_a_site_binding_takes_no_access_flags() -> None:
+    with pytest.raises(ValueError, match="device-only"):
+        ProjectionBinding(
+            target="site",
+            object_type="netbox.site",
+            access_flags={"ssh.allow_legacy_ssh": "custom_fields.x"},
+        )

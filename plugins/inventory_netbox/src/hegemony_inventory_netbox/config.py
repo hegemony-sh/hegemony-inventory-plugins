@@ -56,6 +56,9 @@ DEFAULT_FIELD_MAP = {
     "access_config.ssh.password_ref": "custom_fields.hegemony_ssh_password_ref",
     "access_config.enable.password_ref": "custom_fields.hegemony_enable_password_ref",
     "access_config.ssh.private_key_ref": "custom_fields.hegemony_ssh_private_key_ref",
+    # A boolean custom field, not a reference: true lets steps reach the device
+    # with weak SSH algorithms and small keys.
+    "access_config.ssh.allow_legacy_ssh": "custom_fields.hegemony_ssh_allow_legacy_ssh",
 }
 
 
@@ -261,7 +264,10 @@ class NetBoxProviderConfig(BaseModel):
             for key, value in DEFAULT_FIELD_MAP.items()
             if key.startswith("access_config.")
         },
-        description="Credential-reference paths. Legacy non-credential defaults are ignored.",
+        description=(
+            "Credential-reference paths, and the path of the boolean that allows legacy "
+            "SSH for a device. Legacy non-credential defaults are ignored."
+        ),
     )
     default_access_config: dict[str, Any] = Field(default_factory=dict)
     inventory_filter: NetBoxInventoryFilter = Field(

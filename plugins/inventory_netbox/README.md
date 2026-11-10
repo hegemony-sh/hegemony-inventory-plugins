@@ -78,9 +78,18 @@ Active credential-reference `field_map` defaults:
   "access_config.ssh.username_ref": "custom_fields.hegemony_ssh_username_ref",
   "access_config.ssh.password_ref": "custom_fields.hegemony_ssh_password_ref",
   "access_config.enable.password_ref": "custom_fields.hegemony_enable_password_ref",
-  "access_config.ssh.private_key_ref": "custom_fields.hegemony_ssh_private_key_ref"
+  "access_config.ssh.private_key_ref": "custom_fields.hegemony_ssh_private_key_ref",
+  "access_config.ssh.allow_legacy_ssh": "custom_fields.hegemony_ssh_allow_legacy_ssh"
 }
 ```
+
+The last entry is not a credential reference. It names a **boolean** NetBox custom
+field: set it to true on an old device that supports only weak SSH algorithms or small
+keys, and Hegemony allows legacy SSH for that device only, in every step. A device
+without the custom field, or with it empty or false, stays on secure SSH. A custom
+field of another type (for example text) is refused when the device is synced. The
+jump host is not affected; to allow legacy SSH for a shared jump host, set
+`jump_host.allow_legacy_ssh` in `default_access_config`.
 
 Historical non-credential entries are accepted only at their original default paths
 and discarded during validation. Overrides of those entries are rejected. Device and
