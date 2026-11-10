@@ -1,3 +1,10 @@
+## [0.6.0](https://github.com/hegemony-sh/hegemony-inventory-plugins/compare/v0.5.0...v0.6.0) (2026-11-10)
+
+### Features
+
+* **access:** let a device or jump host allow legacy SSH ([0163353](https://github.com/hegemony-sh/hegemony-inventory-plugins/commit/01633539e95db00fac4dfb4f33472e9347423f3b))
+* **netbox:** read the legacy SSH flag from a boolean custom field ([96599f4](https://github.com/hegemony-sh/hegemony-inventory-plugins/commit/96599f46bb89832f2a8b4cbcb6c330d46cfd63f8))
+
 ## [0.5.0](https://github.com/hegemony-sh/hegemony-inventory-plugins/compare/v0.4.3...v0.5.0) (2026-11-06)
 
 ### Features
