@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 
 class GitInventorySiteV1(BaseModel):
@@ -80,17 +80,40 @@ class GitInventoryJumpHostV1(BaseModel):
     username_ref: str | None = None
     password_ref: str | None = None
     private_key_ref: str | None = None
+    allow_legacy_ssh: StrictBool | None = None
+
+
+#: The one ssh-scope key that is a boolean, not a reference or a name.
+_SSH_BOOLEAN_KEY = "allow_legacy_ssh"
 
 
 class GitInventoryAccessConfigV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    ssh: dict[str, str | None] = Field(default_factory=dict)
+    ssh: dict[str, str | StrictBool | None] = Field(default_factory=dict)
     enable: dict[str, str | None] = Field(default_factory=dict)
     # A device may name its own bastion (a site behind a different jump host)
     # or omit the block and inherit the provider's default_access_config —
     # the same per-device override the ssh/enable scopes have always had.
     jump_host: GitInventoryJumpHostV1 = Field(default_factory=GitInventoryJumpHostV1)
+
+    @field_validator("ssh")
+    @classmethod
+    def only_the_legacy_flag_is_boolean(
+        cls, values: dict[str, str | bool | None]
+    ) -> dict[str, str | bool | None]:
+        """Keep booleans out of references, and text out of the legacy flag.
+
+        The platform drops a non-text reference without a word and refuses a
+        text flag, so both are rejected here, where the file is named.
+        """
+        for key, value in values.items():
+            if key == _SSH_BOOLEAN_KEY:
+                if isinstance(value, str):
+                    raise ValueError(f"ssh.{key} must be true or false")
+            elif isinstance(value, bool):
+                raise ValueError(f"ssh.{key} must be text, not a boolean")
+        return values
 
 
 class GitInventoryDeviceV1(BaseModel):

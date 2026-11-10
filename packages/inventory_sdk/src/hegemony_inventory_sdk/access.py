@@ -12,7 +12,7 @@ silently discards.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 
 class SSHAccessConfig(BaseModel):
@@ -27,6 +27,10 @@ class SSHAccessConfig(BaseModel):
     # Compatibility input for existing provider configs. The platform promotes it to
     # Device.mgmt_port; new providers should set descriptor.mgmt_port directly.
     port: int | None = Field(default=None, ge=1, le=65535)
+    # Lets connections to this device use weak SSH algorithms and small keys,
+    # in every step. Only a real boolean counts, never a string. The jump host
+    # has its own flag; this one does not reach it.
+    allow_legacy_ssh: StrictBool | None = None
 
 
 class EnableAccessConfig(BaseModel):
@@ -47,6 +51,10 @@ class JumpHostAccessConfig(BaseModel):
     username_ref: str | None = None
     password_ref: str | None = None
     private_key_ref: str | None = None
+    # Lets the connection to this bastion use weak SSH algorithms and small
+    # keys. Separate from the device's flag, so an old device does not weaken
+    # its bastion.
+    allow_legacy_ssh: StrictBool | None = None
 
 
 class AccessConfigModel(BaseModel):
