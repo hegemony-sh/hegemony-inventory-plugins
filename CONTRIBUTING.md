@@ -104,9 +104,10 @@ A merge to `main` is a release. The `Release` workflow calls the shared
 workflow, which runs [semantic-release](https://semantic-release.gitbook.io/):
 it reads the Conventional Commits since the last tag, derives the next
 version from them, bumps every package and SDK pin (`scripts/set_version.py`),
-refreshes `uv.lock`, builds and smoke-installs the wheels, prepends
-`CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`, tags `vX.Y.Z` and
-publishes the wheels plus `SHA256SUMS` as the GitHub Release. There is no
+refreshes `uv.lock`, builds the wheels and sdists and smoke-installs the
+wheels, prepends `CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`,
+tags `vX.Y.Z` and publishes the wheels, the sdists and `SHA256SUMS` as the
+GitHub Release. There is no
 manual step any more: do not bump versions or push `v*` tags by hand.
 
 | Commits since the last tag | Release |
@@ -136,7 +137,8 @@ next run reads the tag as the last release. Publish that tag's assets by hand
 from a checkout of the tag, as the shared workflow's
 [README](https://github.com/hegemony-sh/hegemony-github-workflows#recovering-a-tag-without-a-release)
 describes (`gh release create vX.Y.Z --verify-tag ... dist/*.whl
-dist/SHA256SUMS` after rebuilding the wheels at that tag).
+dist/*.tar.gz dist/SHA256SUMS` after rebuilding the wheels and sdists at that
+tag).
 
 The shared workflow is pinned by commit in `.github/workflows/release.yml`;
 a change merged to it reaches this repository through a pull request that
