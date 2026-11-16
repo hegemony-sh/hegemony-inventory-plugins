@@ -126,8 +126,8 @@ Each asynchronous provider call takes keyword-only `context: ProviderCallContext
 which identifies the provider and operation and may carry run metadata, a
 discovered object mapping, a query schema, and a `since` marker.
 Query syntax and supported filters are provider-specific; see the
-[NetBox](../../plugins/inventory_netbox/README.md) and
-[Git](../../plugins/inventory_git/README.md) configuration references.
+[NetBox](https://github.com/hegemony-sh/hegemony-inventory-plugins/blob/main/plugins/inventory_netbox/README.md) and
+[Git](https://github.com/hegemony-sh/hegemony-inventory-plugins/blob/main/plugins/inventory_git/README.md) configuration references.
 
 | Method | Inputs besides context | Output |
 | --- | --- | --- |
