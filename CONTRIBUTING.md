@@ -107,8 +107,14 @@ version from them, bumps every package and SDK pin (`scripts/set_version.py`),
 refreshes `uv.lock`, builds the wheels and sdists and smoke-installs the
 wheels, prepends `CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`,
 tags `vX.Y.Z` and publishes the wheels, the sdists and `SHA256SUMS` as the
-GitHub Release. There is no
-manual step any more: do not bump versions or push `v*` tags by hand.
+GitHub Release. Once that Release is published, the `pypi` job in
+`release.yml` uploads the same wheels and sdists to PyPI with trusted
+publishing and PEP 740 attestations, after checking them against
+`SHA256SUMS` and the released version. It runs in the `pypi` environment,
+which is limited to `main` and waits for a required reviewer; it lives in
+`release.yml` rather than the shared workflow because trusted publishing
+does not work inside a reusable workflow. There is no other manual step: do
+not bump versions or push `v*` tags by hand.
 
 | Commits since the last tag | Release |
 |---|---|
@@ -128,7 +134,9 @@ the next tag already exists and never replaces published assets: fix forward
 with a new commit, which becomes the next release. Attestations are created
 only for public repositories, so a release cut while this repository was private
 has no attestation, only `SHA256SUMS`. That file is published in the same
-release as the wheels, so it checks integrity but not provenance.
+release as the wheels and sdists, so it checks integrity but not provenance.
+A PyPI upload cannot be replaced either, only yanked, which is why the `pypi`
+job waits for the published GitHub Release.
 
 One failure a re-run cannot repair: semantic-release pushes the release
 commit and the `vX.Y.Z` tag before it publishes the GitHub Release, so if
@@ -138,7 +146,9 @@ from a checkout of the tag, as the shared workflow's
 [README](https://github.com/hegemony-sh/hegemony-github-workflows#recovering-a-tag-without-a-release)
 describes (`gh release create vX.Y.Z --verify-tag ... dist/*.whl
 dist/*.tar.gz dist/SHA256SUMS` after rebuilding the wheels and sdists at that
-tag).
+tag). That recovery does not reach PyPI: the `pypi` job runs only in a
+`Release` run that published the Release itself, so a release recovered by
+hand is on GitHub but not on PyPI.
 
 The shared workflow is pinned by commit in `.github/workflows/release.yml`;
 a change merged to it reaches this repository through a pull request that

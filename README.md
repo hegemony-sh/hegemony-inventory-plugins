@@ -81,9 +81,35 @@ providers into each API container that should serve those providers. Restart the
 installing so the registry reloads entry points. Do not use `--system`; Hegemony runs from
 `/opt/venv`.
 
-Released wheels are published with a `SHA256SUMS` file. Verify downloaded wheels before
-installing them. The example installs all providers; remove any wheel names for providers
-that deployment should not enable.
+The packages are on PyPI: `hegemony-inventory-sdk`, `hegemony-inventory-netbox` and
+`hegemony-inventory-git`, from release 0.6.0 on. The release workflow uploads each new
+release with trusted publishing and PEP 740 attestations, which PyPI shows next to each
+file. Outside Docker, install a provider with
+`uv pip install hegemony-inventory-netbox==X.Y.Z` or
+`pip install hegemony-inventory-netbox==X.Y.Z`. In a Hegemony API container, install into
+`/opt/venv` with `--no-deps`, so that the image's own `hegemony-inventory-sdk` and other
+dependencies stay as the image ships them. The example installs all providers; remove any
+package names for providers that deployment should not enable.
+
+```bash
+VERSION=X.Y.Z   # a release tag without the leading v; see Compatibility
+API_CONTAINER=<your API container name>
+
+docker exec -u root -it "${API_CONTAINER}" \
+  uv pip install --python /opt/venv/bin/python --no-deps \
+    "hegemony-inventory-netbox==${VERSION}" \
+    "hegemony-inventory-git==${VERSION}"
+
+docker restart "${API_CONTAINER}"
+```
+
+### From the GitHub Release
+
+Every release also carries the same wheels on its
+[GitHub Release](https://github.com/hegemony-sh/hegemony-inventory-plugins/releases), next
+to the sdists, a `SHA256SUMS` file covering both, and the SLSA provenance bundle
+`hegemony-inventory-plugins-X.Y.Z.intoto.jsonl`. Releases before 0.6.0 are only there.
+Verify downloaded wheels against `SHA256SUMS` before installing them:
 
 ```bash
 VERSION=X.Y.Z   # a release tag without the leading v; see Compatibility
@@ -110,12 +136,28 @@ rm -rf \"\${tmp}\"
 docker restart "${API_CONTAINER}"
 ```
 
-For development, use the same release flow against the dev API container:
+`SHA256SUMS` is published in the same release as the files it lists, so it checks
+integrity but not provenance. To check provenance, verify a downloaded wheel or sdist
+against its attestation with the GitHub CLI:
+
+```bash
+gh attestation verify hegemony_inventory_netbox-X.Y.Z-py3-none-any.whl \
+  --repo hegemony-sh/hegemony-inventory-plugins \
+  --signer-workflow hegemony-sh/hegemony-github-workflows/.github/workflows/plugin-release.yml
+```
+
+To verify offline, add
+`--bundle hegemony-inventory-plugins-X.Y.Z.intoto.jsonl --custom-trusted-root trusted_root.jsonl`,
+with the bundle from the release and a trusted root fetched earlier on a connected machine
+with `gh attestation trusted-root > trusted_root.jsonl`. Releases cut while this repository
+was private have no attestation, only `SHA256SUMS`.
+
+For development, use the same release install against the dev API container:
 
 ```bash
 VERSION=X.Y.Z
 API_CONTAINER=hegemony-dev-api-1
-# then run the same docker exec install block above
+# then run one of the docker exec install blocks above
 ```
 
 Or build local wheels from this repository and copy them into the running dev API
@@ -162,11 +204,13 @@ A provider is an ordinary Python wheel that depends only on
 Hegemony internals, so a provider can be developed and tested without the
 platform.
 
-1. Depend on the SDK and declare the entry point in your `pyproject.toml`:
+1. Depend on the SDK, which is on PyPI, and declare the entry point in your
+   `pyproject.toml`. The SDK is 0.x, where a breaking change releases a new
+   minor version, so depend on one minor at a time:
 
    ```toml
    [project]
-   dependencies = ["hegemony-inventory-sdk>=0.4.1,<0.5"]
+   dependencies = ["hegemony-inventory-sdk>=0.6.0,<0.7"]
 
    [project.entry-points."hegemony.inventory_plugins"]
    my_plugin = "my_plugin:register"

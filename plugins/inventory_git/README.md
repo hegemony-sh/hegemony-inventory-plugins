@@ -19,9 +19,12 @@ the `hegemony.inventory_plugins` entry-point group
 ## Install
 
 Provider wheels are **opt-in** — they are not bundled in the default images.
+The package is on PyPI (`uv pip install hegemony-inventory-git==X.Y.Z` or
+`pip install hegemony-inventory-git==X.Y.Z`); each GitHub Release also carries the same wheel, the
+sdist, `SHA256SUMS` and the SLSA provenance bundle.
 See the root
 [Install From A Release](https://github.com/hegemony-sh/hegemony-inventory-plugins/blob/main/README.md#install-from-a-release) guide for Docker
-commands, checksum verification, and local-wheel development installs.
+commands, checksum and attestation verification, and local-wheel development installs.
 
 ## How it works
 

@@ -11,6 +11,10 @@ Public, dependency-light SDK for building **Hegemony inventory plugins** —
 out-of-tree provider and object-type wheels that the core platform loads at
 runtime.
 
+The SDK is on PyPI (`uv pip install hegemony-inventory-sdk==X.Y.Z` or
+`pip install hegemony-inventory-sdk==X.Y.Z`); each GitHub Release of this repository
+also carries the same wheel, the sdist, `SHA256SUMS` and the SLSA provenance bundle.
+
 A plugin depends only on this package (which depends only on `pydantic`) and
 exposes a `register(registry)` callable under the `hegemony.inventory_plugins`
 entry-point group:
@@ -19,7 +23,7 @@ entry-point group:
 # In your plugin's pyproject.toml. The SDK is 0.x, where a breaking change
 # releases a new minor version, so depend on one minor at a time.
 [project]
-dependencies = ["hegemony-inventory-sdk>=0.4.1,<0.5"]
+dependencies = ["hegemony-inventory-sdk>=0.6.0,<0.7"]
 
 [project.entry-points."hegemony.inventory_plugins"]
 my_plugin = "my_plugin:register"
