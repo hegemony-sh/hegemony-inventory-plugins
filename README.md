@@ -59,10 +59,10 @@ new minor version (see [Contributing](CONTRIBUTING.md#releasing)).
 
 - The documentation site, [hegemony.sh](https://hegemony.sh), covers the
   platform.
-- [Inventory Providers](https://github.com/hegemony-sh/hegemony/blob/develop/docs/guides/inventory-providers.md)
+- [Inventory Providers](https://github.com/hegemony-sh/hegemony/blob/main/docs/guides/inventory-providers.md)
   in the platform documentation is the operator's guide: adding a provider,
   testing the connection, discovery and syncs.
-- [Inventory Plugin Development](https://github.com/hegemony-sh/hegemony/blob/develop/docs/development/inventory-plugins.md)
+- [Inventory Plugin Development](https://github.com/hegemony-sh/hegemony/blob/main/docs/development/inventory-plugins.md)
   in the platform documentation describes the sibling layout, the pinned
   revisions and the Docker install model that this README also describes.
 - Each package has its own README: [SDK](packages/inventory_sdk/README.md),
