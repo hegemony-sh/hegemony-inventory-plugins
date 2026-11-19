@@ -146,7 +146,7 @@ from a checkout of the tag, as the shared workflow's
 [README](https://github.com/hegemony-sh/hegemony-github-workflows#recovering-a-tag-without-a-release)
 describes (`gh release create vX.Y.Z --verify-tag ... dist/*.whl
 dist/*.tar.gz dist/SHA256SUMS` after rebuilding the wheels and sdists at that
-tag). That recovery does not reach PyPI: the `pypi` job runs only in a
+tag, with `SHA256SUMS` covering `*.whl *.tar.gz`). That recovery does not reach PyPI: the `pypi` job runs only in a
 `Release` run that published the Release itself, so a release recovered by
 hand is on GitHub but not on PyPI.
 
