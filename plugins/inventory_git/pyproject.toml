@@ -7,10 +7,28 @@
 name = "hegemony-inventory-git"
 version = "0.6.0"
 description = "Git YAML inventory provider plugin for Hegemony"
+readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+]
 dependencies = ["hegemony-inventory-sdk==0.6.0", "pyyaml>=6.0.0", "jsonschema>=4.23.0,<5"]
+
+[project.urls]
+Homepage = "https://hegemony.sh"
+Documentation = "https://hegemony.sh"
+Source = "https://github.com/hegemony-sh/hegemony-inventory-plugins"
+Issues = "https://github.com/hegemony-sh/hegemony-inventory-plugins/issues"
+Changelog = "https://github.com/hegemony-sh/hegemony-inventory-plugins/blob/main/CHANGELOG.md"
 
 [project.entry-points."hegemony.inventory_plugins"]
 git = "hegemony_inventory_git:register"

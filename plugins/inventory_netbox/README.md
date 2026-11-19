@@ -11,16 +11,19 @@ NetBox inventory provider for **Hegemony**. Reads and queries **devices** and **
 from a NetBox instance over its REST API and feeds them into the core inventory.
 
 It is an out-of-tree plugin: it depends only on
-[`hegemony-inventory-sdk`](../../packages/inventory_sdk) and is discovered at runtime via
+[`hegemony-inventory-sdk`](https://github.com/hegemony-sh/hegemony-inventory-plugins/tree/main/packages/inventory_sdk) and is discovered at runtime via
 the `hegemony.inventory_plugins` entry-point group
 (`netbox = "hegemony_inventory_netbox:register"`).
 
 ## Install
 
 Provider wheels are **opt-in** — they are not bundled in the default images.
+The package is on PyPI (`uv pip install hegemony-inventory-netbox==X.Y.Z` or
+`pip install hegemony-inventory-netbox==X.Y.Z`); each GitHub Release also carries the same wheel, the
+sdist, `SHA256SUMS` and the SLSA provenance bundle.
 See the root
-[Install From A Release](../../README.md#install-from-a-release) guide for Docker
-commands, checksum verification, and local-wheel development installs.
+[Install From A Release](https://github.com/hegemony-sh/hegemony-inventory-plugins/blob/main/README.md#install-from-a-release) guide for Docker
+commands, checksum and attestation verification, and local-wheel development installs.
 
 ## Configure
 
