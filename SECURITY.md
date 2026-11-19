@@ -13,13 +13,13 @@ Security reports are handled privately. Please do not open a public GitHub issue
 
 This repository holds the Hegemony inventory SDK (`hegemony-inventory-sdk`) and the NetBox and Git inventory provider wheels (`hegemony-inventory-netbox`, `hegemony-inventory-git`). Report here a vulnerability in one of these packages: for example how a provider handles credentials or tokens, builds requests to the system it reads, or parses the data it receives.
 
-A vulnerability in the Hegemony platform itself belongs to the platform's [security policy](https://github.com/hegemony-sh/hegemony/blob/develop/SECURITY.md). Follow that policy's reporting instructions for platform vulnerabilities.
+A vulnerability in the Hegemony platform itself belongs to the platform's [security policy](https://github.com/hegemony-sh/hegemony/blob/main/SECURITY.md). Follow that policy's reporting instructions for platform vulnerabilities.
 
 ## Supported versions
 
 The three packages are versioned in lockstep and released from `main` (see [CONTRIBUTING.md](CONTRIBUTING.md#releasing)). This repository does not maintain older release lines: a security fix is published as a new release, and releases are immutable, so a published release is never changed.
 
-Hegemony pins the release of this repository it is built against. When a fix is released here, the platform moves its pin to the new release tag, as the platform's [release process](https://github.com/hegemony-sh/hegemony/blob/develop/docs/development/release-process.md) describes. The platform's [supported versions](https://github.com/hegemony-sh/hegemony/blob/develop/SECURITY.md#supported-versions) say which platform lines receive security fixes.
+Hegemony pins the release of this repository it is built against. When a fix is released here, the platform moves its pin to the new release tag, as the platform's [release process](https://github.com/hegemony-sh/hegemony/blob/main/docs/development/release-process.md) describes. The platform's [supported versions](https://github.com/hegemony-sh/hegemony/blob/main/SECURITY.md#supported-versions) say which platform lines receive security fixes.
 
 If you install the wheels into your own Hegemony deployment, update to the newest release when a security advisory names your version.
 
