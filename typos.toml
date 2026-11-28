@@ -25,3 +25,8 @@ extend-ignore-identifiers-re = [
     # Ignore the shape rather than the words.
     "[A-Z]{2,}[a-z]{1,4}",
 ]
+
+[default.extend-words]
+# in-toto, the attestation format: the provenance bundle on each GitHub Release
+# is named `<repo>-<version>.intoto.jsonl`, which typos reads as `into`.
+intoto = "intoto"

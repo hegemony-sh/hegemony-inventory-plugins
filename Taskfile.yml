@@ -77,7 +77,7 @@ tasks:
       - task: licenses:packages
 
   build:
-    desc: Build all workspace wheels into dist/
+    desc: Build all workspace wheels and sdists into dist/
     cmds:
       - uv run python scripts/build_wheels.py
 

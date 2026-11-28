@@ -104,10 +104,17 @@ A merge to `main` is a release. The `Release` workflow calls the shared
 workflow, which runs [semantic-release](https://semantic-release.gitbook.io/):
 it reads the Conventional Commits since the last tag, derives the next
 version from them, bumps every package and SDK pin (`scripts/set_version.py`),
-refreshes `uv.lock`, builds and smoke-installs the wheels, prepends
-`CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`, tags `vX.Y.Z` and
-publishes the wheels plus `SHA256SUMS` as the GitHub Release. There is no
-manual step any more: do not bump versions or push `v*` tags by hand.
+refreshes `uv.lock`, builds the wheels and sdists and smoke-installs the
+wheels, prepends `CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`,
+tags `vX.Y.Z` and publishes the wheels, the sdists and `SHA256SUMS` as the
+GitHub Release. Once that Release is published, the `pypi` job in
+`release.yml` uploads the same wheels and sdists to PyPI with trusted
+publishing and PEP 740 attestations, after checking them against
+`SHA256SUMS` and the released version. It runs in the `pypi` environment,
+which is limited to `main` and waits for a required reviewer; it lives in
+`release.yml` rather than the shared workflow because trusted publishing
+does not work inside a reusable workflow. There is no other manual step: do
+not bump versions or push `v*` tags by hand.
 
 | Commits since the last tag | Release |
 |---|---|
@@ -127,7 +134,9 @@ the next tag already exists and never replaces published assets: fix forward
 with a new commit, which becomes the next release. Attestations are created
 only for public repositories, so a release cut while this repository was private
 has no attestation, only `SHA256SUMS`. That file is published in the same
-release as the wheels, so it checks integrity but not provenance.
+release as the wheels and sdists, so it checks integrity but not provenance.
+A PyPI upload cannot be replaced either, only yanked, which is why the `pypi`
+job waits for the published GitHub Release.
 
 One failure a re-run cannot repair: semantic-release pushes the release
 commit and the `vX.Y.Z` tag before it publishes the GitHub Release, so if
@@ -136,7 +145,44 @@ next run reads the tag as the last release. Publish that tag's assets by hand
 from a checkout of the tag, as the shared workflow's
 [README](https://github.com/hegemony-sh/hegemony-github-workflows#recovering-a-tag-without-a-release)
 describes (`gh release create vX.Y.Z --verify-tag ... dist/*.whl
-dist/SHA256SUMS` after rebuilding the wheels at that tag).
+dist/*.tar.gz dist/SHA256SUMS` after rebuilding the wheels and sdists at that
+tag, with `SHA256SUMS` covering `*.whl *.tar.gz`). That recovery does not reach PyPI: the `pypi` job runs only in a
+`Release` run that published the Release itself, so a release recovered by
+hand is on GitHub but not on PyPI.
+
+When the `pypi` job cannot do the upload, a maintainer uploads that Release's
+files to PyPI by hand. This covers a tag recovered by hand (the job does not
+run for it), a Release cut while the repository was private (it has no
+attestations, and the job refuses files without one), and a failed `pypi` job
+whose run is older than 30 days (GitHub no longer re-runs it):
+
+```bash
+(
+  set -euo pipefail
+  mkdir pypi-upload
+  cd pypi-upload
+  gh release download vX.Y.Z --repo hegemony-sh/hegemony-inventory-plugins \
+    --pattern '*.whl' --pattern '*.tar.gz' --pattern SHA256SUMS
+  sha256sum --check --strict SHA256SUMS
+  shopt -s nullglob
+  files=(*.whl *.tar.gz)
+  for file in "${files[@]}"; do
+    awk -v f="$file" '$2 == f {found = 1} END {exit !found}' SHA256SUMS || { echo "${file} is not in SHA256SUMS" >&2; exit 1; }
+  done
+  TWINE_USERNAME=__token__ uvx twine upload --skip-existing "${files[@]}"
+)
+```
+
+The subshell stops at the first failed step, so nothing is uploaded unless
+every file downloaded, matched `SHA256SUMS` and is listed there.
+
+Check the files with `gh attestation verify` first when the Release has
+attestations. A PyPI token scoped to one project can upload only that
+project, and the command above uploads every project in the Release. So
+either create a short-lived account-wide token, paste it when twine asks for
+the password and delete it right after, or keep project tokens and run the
+upload once per project with only that project's files. A hand upload
+carries no PEP 740 attestations.
 
 The shared workflow is pinned by commit in `.github/workflows/release.yml`;
 a change merged to it reaches this repository through a pull request that

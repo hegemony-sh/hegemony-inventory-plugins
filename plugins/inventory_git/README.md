@@ -12,16 +12,19 @@ plain YAML files in a Git repository you already manage, and feeds them into the
 inventory.
 
 It is an out-of-tree plugin: it depends only on
-[`hegemony-inventory-sdk`](../../packages/inventory_sdk) and is discovered at runtime via
+[`hegemony-inventory-sdk`](https://github.com/hegemony-sh/hegemony-inventory-plugins/tree/main/packages/inventory_sdk) and is discovered at runtime via
 the `hegemony.inventory_plugins` entry-point group
 (`git = "hegemony_inventory_git:register"`).
 
 ## Install
 
 Provider wheels are **opt-in** — they are not bundled in the default images.
+The package is on PyPI (`uv pip install hegemony-inventory-git==X.Y.Z` or
+`pip install hegemony-inventory-git==X.Y.Z`); each GitHub Release also carries the same wheel, the
+sdist, `SHA256SUMS` and the SLSA provenance bundle.
 See the root
-[Install From A Release](../../README.md#install-from-a-release) guide for Docker
-commands, checksum verification, and local-wheel development installs.
+[Install From A Release](https://github.com/hegemony-sh/hegemony-inventory-plugins/blob/main/README.md#install-from-a-release) guide for Docker
+commands, checksum and attestation verification, and local-wheel development installs.
 
 ## How it works
 
@@ -91,7 +94,7 @@ Rules enforced by the loader (fail-closed — any error rejects the whole sync):
 - Duplicate local site ids or names are allowed in different branches because the full path is
   the unique identity.
 
-A ready-to-copy example lives in [`examples/`](examples/) (two devices + three nested sites).
+A ready-to-copy example lives in [`examples/`](https://github.com/hegemony-sh/hegemony-inventory-plugins/tree/main/plugins/inventory_git/examples) (two devices + three nested sites).
 Copy its contents into your repository and set `path` to wherever you put it.
 
 ### Site fields (`sites/.../<external_id>.yaml`)
@@ -160,7 +163,7 @@ upgraded.
 
 1. Add your inventory repository under **Settings → Git Repositories** (URL, branch,
    credentials).
-2. Put the [`examples/`](examples/) tree (or your own) into that repo, e.g. under
+2. Put the [`examples/`](https://github.com/hegemony-sh/hegemony-inventory-plugins/tree/main/plugins/inventory_git/examples) tree (or your own) into that repo, e.g. under
    `inventory/`.
 3. Create a `git` inventory provider: pick the repository, set `branch`, and set `path` to
    `inventory`.
@@ -196,5 +199,5 @@ the inventory submenu with schema-driven list/detail pages — no core change, n
 
 ## Generic object types
 
-See [Generic Git inventory objects](GENERIC_OBJECTS.md) for declarative type definitions,
+See [Generic Git inventory objects](https://github.com/hegemony-sh/hegemony-inventory-plugins/blob/main/plugins/inventory_git/GENERIC_OBJECTS.md) for declarative type definitions,
 attributes, relationships, discovery, synchronization, and cascading flow inputs.
